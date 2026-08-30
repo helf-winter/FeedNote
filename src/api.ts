@@ -81,6 +81,7 @@ export interface AppSettings {
   mobilePushProvider: "ntfy" | "webhook";
   mobileReminderMinutes: 0 | 5 | 15 | 30 | 60;
   feishuSyncEnabled: boolean;
+  feishuTaskRemindersEnabled: boolean;
   feishuSourceEnabled: boolean;
   feishuSourceUrl: string;
 }
@@ -91,6 +92,9 @@ export interface FeishuSyncStatus {
   spreadsheetUrl?: string;
   pendingPlans: number;
   lastError?: string;
+  taskRemindersEnabled: boolean;
+  pendingTaskReminders: number;
+  taskReminderError?: string;
 }
 
 export interface FeishuSourceStatus {
@@ -239,6 +243,7 @@ function initialMockState(): MockState {
       mobilePushProvider: "ntfy",
       mobileReminderMinutes: 15,
       feishuSyncEnabled: false,
+      feishuTaskRemindersEnabled: false,
       feishuSourceEnabled: false,
       feishuSourceUrl: "",
     },
@@ -514,6 +519,8 @@ export async function getFeishuSyncStatus(): Promise<FeishuSyncStatus> {
     enabled: false,
     configured: false,
     pendingPlans: 0,
+    taskRemindersEnabled: false,
+    pendingTaskReminders: 0,
   };
 }
 

@@ -8,8 +8,9 @@ use uuid::Uuid;
 use crate::{
     error::{AppError, AppResult},
     models::{
-        AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, FeedEvent, FeishuSheetState,
-        MemoryDetail, MemorySummary, MemoryVersion, PlanItem, PlanProposal, ReviewItem, Stats,
+        AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, FeedEvent,
+        FeishuPlanTaskMapping, FeishuSheetState, MemoryDetail, MemorySummary, MemoryVersion,
+        PlanItem, PlanProposal, ReviewItem, Stats,
     },
 };
 
@@ -165,6 +166,14 @@ impl Database {
 
             CREATE TABLE IF NOT EXISTS feishu_plan_cleanup_queue (
                 plan_id TEXT PRIMARY KEY
+            );
+
+            CREATE TABLE IF NOT EXISTS feishu_plan_tasks (
+                plan_id TEXT PRIMARY KEY,
+                task_guid TEXT NOT NULL,
+                task_url TEXT,
+                plan_updated_at INTEGER NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -525,6 +534,110 @@ impl Database {
             )?;
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn list_feishu_plan_task_mappings(&self) -> AppResult<Vec<FeishuPlanTaskMapping>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut statement = connection.prepare(
+            "SELECT plan_id, task_guid, task_url, plan_updated_at, completed
+             FROM feishu_plan_tasks ORDER BY plan_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(FeishuPlanTaskMapping {
+                plan_id: row.get(0)?,
+                task_guid: row.get(1)?,
+                task_url: row.get(2)?,
+                plan_updated_at: row.get(3)?,
+                completed: row.get::<_, i64>(4)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn save_feishu_plan_task_mapping(&self, mapping: &FeishuPlanTaskMapping) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute(
+            "INSERT INTO feishu_plan_tasks
+             (plan_id, task_guid, task_url, plan_updated_at, completed)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(plan_id) DO UPDATE SET
+               task_guid = excluded.task_guid,
+               task_url = excluded.task_url,
+               plan_updated_at = excluded.plan_updated_at,
+               completed = excluded.completed",
+            params![
+                mapping.plan_id,
+                mapping.task_guid,
+                mapping.task_url,
+                mapping.plan_updated_at,
+                mapping.completed as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_feishu_plan_task_mapping(&self, plan_id: &str) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute(
+            "DELETE FROM feishu_plan_tasks WHERE plan_id = ?1",
+            [plan_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_pending_feishu_plan_tasks(&self) -> AppResult<i64> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        count(
+            &connection,
+            "SELECT COUNT(*)
+             FROM plans p
+             LEFT JOIN feishu_plan_tasks t ON t.plan_id = p.id
+             WHERE p.scheduled_at IS NOT NULL
+               AND (
+                 (p.status != 'done' AND
+                   (t.plan_id IS NULL OR t.plan_updated_at < p.updated_at OR t.completed = 1))
+                 OR
+                 (p.status = 'done' AND t.plan_id IS NOT NULL AND
+                   (t.plan_updated_at < p.updated_at OR t.completed = 0))
+               )",
+        )
+        .and_then(|pending| {
+            count(
+                &connection,
+                "SELECT COUNT(*) FROM feishu_plan_tasks t
+                 WHERE NOT EXISTS (SELECT 1 FROM plans p WHERE p.id = t.plan_id)",
+            )
+            .map(|orphaned| pending + orphaned)
+        })
+    }
+
+    pub fn get_feishu_task_sync_error(&self) -> AppResult<Option<String>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'feishu_task_sync_error'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn save_feishu_task_sync_error(&self, error: Option<&str>) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        if let Some(error) = error {
+            connection.execute(
+                "INSERT INTO settings (key, value) VALUES ('feishu_task_sync_error', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [truncate(error, 2_000)],
+            )?;
+        } else {
+            connection.execute(
+                "DELETE FROM settings WHERE key = 'feishu_task_sync_error'",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -1736,6 +1849,47 @@ mod tests {
             .list_due_plan_reminders(1_788_130_000_000, 1_788_134_400_000)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn feishu_task_mapping_tracks_create_update_and_completion() {
+        let database = Database::in_memory().unwrap();
+        let feed = database
+            .create_selection_feed("明天验收", "明天上午九点验收", "测试")
+            .unwrap();
+        let plan = database
+            .create_plan(
+                &feed.feed_id,
+                &plan_proposal(false),
+                Some(1_788_134_400_000),
+                "测试",
+            )
+            .unwrap();
+        assert_eq!(database.count_pending_feishu_plan_tasks().unwrap(), 1);
+
+        database
+            .save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
+                plan_id: plan.id.clone(),
+                task_guid: "task-guid".to_string(),
+                task_url: Some("https://applink.feishu.cn/task".to_string()),
+                plan_updated_at: plan.updated_at,
+                completed: false,
+            })
+            .unwrap();
+        assert_eq!(database.count_pending_feishu_plan_tasks().unwrap(), 0);
+
+        let done = database.set_plan_done(&plan.id, true).unwrap();
+        assert_eq!(database.count_pending_feishu_plan_tasks().unwrap(), 1);
+        database
+            .save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
+                plan_id: plan.id,
+                task_guid: "task-guid".to_string(),
+                task_url: None,
+                plan_updated_at: done.updated_at,
+                completed: true,
+            })
+            .unwrap();
+        assert_eq!(database.count_pending_feishu_plan_tasks().unwrap(), 0);
     }
 
     #[test]

@@ -84,6 +84,7 @@ pub struct AppSettings {
     pub mobile_push_provider: String,
     pub mobile_reminder_minutes: u32,
     pub feishu_sync_enabled: bool,
+    pub feishu_task_reminders_enabled: bool,
     pub feishu_source_enabled: bool,
     pub feishu_source_url: String,
 }
@@ -101,6 +102,7 @@ impl Default for AppSettings {
             mobile_push_provider: "ntfy".to_string(),
             mobile_reminder_minutes: 15,
             feishu_sync_enabled: false,
+            feishu_task_reminders_enabled: false,
             feishu_source_enabled: false,
             feishu_source_url: String::new(),
         }
@@ -149,6 +151,7 @@ pub struct UpdateSettingsInput {
     pub mobile_push_provider: String,
     pub mobile_reminder_minutes: u32,
     pub feishu_sync_enabled: bool,
+    pub feishu_task_reminders_enabled: bool,
     pub feishu_source_enabled: bool,
     pub feishu_source_url: String,
 }
@@ -250,6 +253,18 @@ pub struct FeishuSyncStatus {
     pub spreadsheet_url: Option<String>,
     pub pending_plans: i64,
     pub last_error: Option<String>,
+    pub task_reminders_enabled: bool,
+    pub pending_task_reminders: i64,
+    pub task_reminder_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FeishuPlanTaskMapping {
+    pub plan_id: String,
+    pub task_guid: String,
+    pub task_url: Option<String>,
+    pub plan_updated_at: i64,
+    pub completed: bool,
 }
 
 #[derive(Debug, Serialize)]

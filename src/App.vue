@@ -82,6 +82,7 @@ const settings = ref<AppSettings>({
   mobilePushProvider: "ntfy",
   mobileReminderMinutes: 15,
   feishuSyncEnabled: false,
+  feishuTaskRemindersEnabled: false,
   feishuSourceEnabled: false,
   feishuSourceUrl: "",
 });
@@ -101,6 +102,8 @@ const feishuStatus = ref<FeishuSyncStatus>({
   enabled: false,
   configured: false,
   pendingPlans: 0,
+  taskRemindersEnabled: false,
+  pendingTaskReminders: 0,
   lastError: undefined,
 });
 const feishuSourceState = ref<"idle" | "syncing" | "success" | "error">("idle");
@@ -298,6 +301,8 @@ async function refreshFeishuStatus(): Promise<void> {
       enabled: settings.value.feishuSyncEnabled,
       configured: false,
       pendingPlans: 0,
+      taskRemindersEnabled: settings.value.feishuTaskRemindersEnabled,
+      pendingTaskReminders: 0,
     };
   }
 }
@@ -305,7 +310,7 @@ async function refreshFeishuStatus(): Promise<void> {
 async function runFeishuSync(): Promise<void> {
   if (feishuSyncState.value === "syncing") return;
   feishuSyncState.value = "syncing";
-  feishuSyncMessage.value = "正在连接飞书并同步计划...";
+  feishuSyncMessage.value = "正在同步飞书计划表和待办提醒...";
   try {
     await updateSettings(settings.value);
     feishuSyncMessage.value = await syncFeishuNow();
@@ -746,6 +751,30 @@ function typeLabel(type: string): string {
 
         <div class="settings-section">
           <div class="settings-heading">
+            <div><h2>飞书待办提醒</h2><p>为有明确时间的计划创建个人飞书任务，并在开始前 3 小时提醒。</p></div>
+            <label class="toggle-control">
+              <input v-model="settings.feishuTaskRemindersEnabled" type="checkbox" />
+              <span aria-hidden="true" />
+              <strong>{{ settings.feishuTaskRemindersEnabled ? "已开启" : "已关闭" }}</strong>
+            </label>
+          </div>
+          <div class="form-grid" :class="{ muted: !settings.feishuTaskRemindersEnabled }">
+            <label><span>任务负责人</span><input value="投递记录表所有者" type="text" readonly /></label>
+            <label><span>提醒时间</span><input value="计划开始前 3 小时" type="text" readonly /></label>
+            <label><span>同步队列</span><input :value="`${feishuStatus.pendingTaskReminders} 条待同步`" type="text" readonly /></label>
+          </div>
+          <div class="settings-actions">
+            <button class="secondary-button" type="button" :disabled="!settings.feishuTaskRemindersEnabled || feishuSyncState === 'syncing'" @click="runFeishuSync">
+              <LoaderCircle v-if="feishuSyncState === 'syncing'" class="spin" :size="16" />
+              <Clock3 v-else :size="16" />立即同步
+            </button>
+            <button class="primary-button" type="button" @click="saveSettings"><Check :size="16" />保存设置</button>
+          </div>
+          <p v-if="feishuStatus.taskReminderError" class="connection-result error">{{ feishuStatus.taskReminderError }}</p>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-heading">
             <div><h2>数据导出</h2><p>导出原始投喂和当前记忆为带版本号的 JSON。</p></div>
             <Archive :size="22" />
           </div>
@@ -763,6 +792,7 @@ function typeLabel(type: string): string {
             <li>不监听剪贴板、键盘，也不扫描用户目录。</li>
             <li><Smartphone :size="14" />手机推送默认关闭，只发送计划卡片字段，不发送原文和周边上下文。</li>
             <li><Cloud :size="14" />两个飞书通道独立开关、独立写入；关闭后不会向对应表格发起写请求。</li>
+            <li><Clock3 :size="14" />飞书待办提醒独立开关，只同步已有计划字段并固定提前 3 小时提醒。</li>
           </ul>
         </div>
       </section>

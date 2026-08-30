@@ -16,14 +16,15 @@ use crate::{
     db::Database,
     error::{AppError, AppResult},
     models::{
-        ApplicationRecordProposal, ApplicationWriteResult, FeishuSheetState, FeishuSourceStatus,
-        FeishuSyncStatus, PlanItem,
+        ApplicationRecordProposal, ApplicationWriteResult, FeishuPlanTaskMapping, FeishuSheetState,
+        FeishuSourceStatus, FeishuSyncStatus, PlanItem,
     },
     secrets::parse_env,
 };
 
 const API_BASE: &str = "https://open.feishu.cn/open-apis";
 const SHEET_TITLE: &str = "FeedNote 计划";
+const TASK_REMINDER_MINUTES: i64 = 180;
 const HEADERS: [&str; 9] = [
     "本地计划ID",
     "状态",
@@ -39,6 +40,8 @@ const HEADERS: [&str; 9] = [
 struct FeishuSecrets {
     app_id: String,
     app_secret: String,
+    task_assignee_id: Option<String>,
+    task_assignee_id_type: Option<String>,
 }
 
 impl FeishuSecrets {
@@ -54,7 +57,24 @@ impl FeishuSecrets {
                 "FEISHU_APP_ID 格式无效".to_string(),
             ));
         }
-        Ok(Self { app_id, app_secret })
+        let task_assignee_id = values
+            .get("FEISHU_TASK_ASSIGNEE_ID")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let task_assignee_id_type = values
+            .get("FEISHU_TASK_ASSIGNEE_ID_TYPE")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        Ok(Self {
+            app_id,
+            app_secret,
+            task_assignee_id,
+            task_assignee_id_type,
+        })
     }
 
     fn is_configured(path: &Path) -> bool {
@@ -78,21 +98,34 @@ pub fn start_scheduler(
             let cleanup_pending = database
                 .list_feishu_plan_cleanup_ids()
                 .is_ok_and(|plan_ids| !plan_ids.is_empty());
-            if settings.feishu_sync_enabled || cleanup_pending {
+            if settings.feishu_sync_enabled
+                || settings.feishu_task_reminders_enabled
+                || cleanup_pending
+            {
                 if let Some(_guard) = SyncGuard::acquire(&syncing) {
                     if let Err(error) = cleanup_legacy_plan_rows(&database, &secrets_path).await {
                         let _ = database.save_feishu_sync_error(Some(&error.to_string()));
                         continue;
                     }
-                    if !settings.feishu_sync_enabled {
-                        continue;
-                    }
-                    match sync_pending(&database, &secrets_path).await {
-                        Ok(_) => {
-                            let _ = database.save_feishu_sync_error(None);
+                    if settings.feishu_sync_enabled {
+                        match sync_pending(&database, &secrets_path).await {
+                            Ok(_) => {
+                                let _ = database.save_feishu_sync_error(None);
+                            }
+                            Err(error) => {
+                                let _ = database.save_feishu_sync_error(Some(&error.to_string()));
+                            }
                         }
-                        Err(error) => {
-                            let _ = database.save_feishu_sync_error(Some(&error.to_string()));
+                    }
+                    if settings.feishu_task_reminders_enabled {
+                        match sync_plan_tasks(&database, &secrets_path).await {
+                            Ok(_) => {
+                                let _ = database.save_feishu_task_sync_error(None);
+                            }
+                            Err(error) => {
+                                let _ =
+                                    database.save_feishu_task_sync_error(Some(&error.to_string()));
+                            }
                         }
                     }
                 }
@@ -110,6 +143,9 @@ pub fn status(database: &Database, secrets_path: &Path) -> AppResult<FeishuSyncS
         spreadsheet_url: state.map(|state| state.spreadsheet_url),
         pending_plans: database.count_pending_feishu_plans()?,
         last_error: database.get_feishu_sync_error()?,
+        task_reminders_enabled: settings.feishu_task_reminders_enabled,
+        pending_task_reminders: database.count_pending_feishu_plan_tasks()?,
+        task_reminder_error: database.get_feishu_task_sync_error()?,
     })
 }
 
@@ -121,20 +157,43 @@ pub async fn sync_now(
     let _guard = SyncGuard::acquire(syncing)
         .ok_or_else(|| AppError::FeishuUnavailable("同步正在进行，请稍后查看状态".to_string()))?;
     cleanup_legacy_plan_rows(database, secrets_path).await?;
-    let synced = match sync_pending(database, secrets_path).await {
-        Ok(synced) => {
-            database.save_feishu_sync_error(None)?;
-            synced
+    let settings = database.get_settings()?;
+    let synced = if settings.feishu_sync_enabled {
+        match sync_pending(database, secrets_path).await {
+            Ok(synced) => {
+                database.save_feishu_sync_error(None)?;
+                synced
+            }
+            Err(error) => {
+                database.save_feishu_sync_error(Some(&error.to_string()))?;
+                return Err(error);
+            }
         }
-        Err(error) => {
-            database.save_feishu_sync_error(Some(&error.to_string()))?;
-            return Err(error);
-        }
-    };
-    Ok(if synced == 0 {
-        "飞书表格已连接，没有待同步计划".to_string()
     } else {
+        0
+    };
+    let task_synced = if settings.feishu_task_reminders_enabled {
+        match sync_plan_tasks(database, secrets_path).await {
+            Ok(synced) => {
+                database.save_feishu_task_sync_error(None)?;
+                synced
+            }
+            Err(error) => {
+                database.save_feishu_task_sync_error(Some(&error.to_string()))?;
+                return Err(error);
+            }
+        }
+    } else {
+        0
+    };
+    Ok(if synced == 0 && task_synced == 0 {
+        "飞书计划表和待办提醒均已同步".to_string()
+    } else if task_synced == 0 {
         format!("已同步 {synced} 条计划到飞书表格")
+    } else if synced == 0 {
+        format!("已同步 {task_synced} 条飞书待办提醒")
+    } else {
+        format!("已同步 {synced} 条计划和 {task_synced} 条飞书待办提醒")
     })
 }
 
@@ -607,6 +666,264 @@ fn source_token(value: &str) -> AppResult<String> {
         .map(|parts| parts[1].to_string())
         .filter(|token| !token.is_empty())
         .ok_or_else(|| AppError::Validation("飞书来源链接缺少表格 token".to_string()))
+}
+
+struct TaskAssignee {
+    id: String,
+    id_type: String,
+}
+
+async fn sync_plan_tasks(database: &Database, secrets_path: &Path) -> AppResult<usize> {
+    if database.count_pending_feishu_plan_tasks()? == 0 {
+        return Ok(0);
+    }
+    let settings = database.get_settings()?;
+    let secrets = FeishuSecrets::load(secrets_path)?;
+    let client = client()?;
+    let token = tenant_access_token(&client, &secrets).await?;
+    let assignee = resolve_task_assignee(&client, &token, &settings, &secrets).await?;
+    let plans = database.list_plans(true)?;
+    let mappings = database.list_feishu_plan_task_mappings()?;
+    let plans_by_id: HashMap<&str, &PlanItem> =
+        plans.iter().map(|plan| (plan.id.as_str(), plan)).collect();
+    let mappings_by_plan: HashMap<&str, &FeishuPlanTaskMapping> = mappings
+        .iter()
+        .map(|mapping| (mapping.plan_id.as_str(), mapping))
+        .collect();
+    let mut synced = 0;
+
+    for mapping in &mappings {
+        if plans_by_id.contains_key(mapping.plan_id.as_str()) {
+            continue;
+        }
+        complete_task(&client, &token, &assignee.id_type, &mapping.task_guid).await?;
+        database.delete_feishu_plan_task_mapping(&mapping.plan_id)?;
+        synced += 1;
+    }
+
+    for plan in &plans {
+        if plan.scheduled_at.is_none() {
+            continue;
+        }
+        let mapping = mappings_by_plan.get(plan.id.as_str()).copied();
+        if plan.status == "done" && mapping.is_none() {
+            continue;
+        }
+        let completed = plan.status == "done";
+        if let Some(mapping) = mapping {
+            if mapping.plan_updated_at >= plan.updated_at && mapping.completed == completed {
+                continue;
+            }
+            let task_url = patch_task(
+                &client,
+                &token,
+                &assignee.id_type,
+                &mapping.task_guid,
+                plan,
+                completed,
+            )
+            .await?
+            .or_else(|| mapping.task_url.clone());
+            database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
+                plan_id: plan.id.clone(),
+                task_guid: mapping.task_guid.clone(),
+                task_url,
+                plan_updated_at: plan.updated_at,
+                completed,
+            })?;
+            synced += 1;
+        } else {
+            let mapping = create_task(&client, &token, &assignee, plan).await?;
+            database.save_feishu_plan_task_mapping(&mapping)?;
+            synced += 1;
+        }
+    }
+    Ok(synced)
+}
+
+async fn resolve_task_assignee(
+    client: &Client,
+    token: &str,
+    settings: &crate::models::AppSettings,
+    secrets: &FeishuSecrets,
+) -> AppResult<TaskAssignee> {
+    if let Some(id) = secrets.task_assignee_id.as_deref() {
+        let id_type = secrets
+            .task_assignee_id_type
+            .as_deref()
+            .unwrap_or("open_id");
+        validate_user_id_type(id_type)?;
+        return Ok(TaskAssignee {
+            id: id.to_string(),
+            id_type: id_type.to_string(),
+        });
+    }
+    if settings.feishu_source_url.trim().is_empty() {
+        return Err(AppError::FeishuUnavailable(
+            "无法确定飞书待办负责人：请先配置用户拥有的投递记录表".to_string(),
+        ));
+    }
+    let spreadsheet_token = source_token(&settings.feishu_source_url)?;
+    let response = client
+        .get(format!(
+            "{API_BASE}/sheets/v3/spreadsheets/{spreadsheet_token}"
+        ))
+        .bearer_auth(token)
+        .query(&[("user_id_type", "union_id")])
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let owner_id = string_field(&payload["data"]["spreadsheet"], "owner_id")?;
+    if owner_id.starts_with("cli_") {
+        return Err(AppError::FeishuUnavailable(
+            "投递记录表所有者是应用而不是用户，无法投递个人待办提醒".to_string(),
+        ));
+    }
+    Ok(TaskAssignee {
+        id: owner_id,
+        id_type: "union_id".to_string(),
+    })
+}
+
+fn validate_user_id_type(value: &str) -> AppResult<()> {
+    if matches!(value, "open_id" | "union_id" | "user_id") {
+        Ok(())
+    } else {
+        Err(AppError::FeishuUnavailable(
+            "FEISHU_TASK_ASSIGNEE_ID_TYPE 只允许 open_id、union_id 或 user_id".to_string(),
+        ))
+    }
+}
+
+async fn create_task(
+    client: &Client,
+    token: &str,
+    assignee: &TaskAssignee,
+    plan: &PlanItem,
+) -> AppResult<FeishuPlanTaskMapping> {
+    let timestamp = plan
+        .scheduled_at
+        .ok_or_else(|| AppError::Validation("没有时间的计划不能创建飞书待办".to_string()))?
+        .to_string();
+    let response = client
+        .post(format!("{API_BASE}/task/v2/tasks"))
+        .bearer_auth(token)
+        .query(&[("user_id_type", assignee.id_type.as_str())])
+        .json(&json!({
+            "summary": truncate_chars(plan.title.trim(), 3_000),
+            "description": task_description(plan),
+            "start": { "timestamp": timestamp, "is_all_day": false },
+            "due": { "timestamp": timestamp, "is_all_day": false },
+            "reminders": [{ "relative_fire_minute": TASK_REMINDER_MINUTES }],
+            "members": [{ "id": assignee.id, "type": "user", "role": "assignee" }],
+            "client_token": plan.id,
+        }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let task = &payload["data"]["task"];
+    Ok(FeishuPlanTaskMapping {
+        plan_id: plan.id.clone(),
+        task_guid: string_field(task, "guid")?,
+        task_url: task["url"].as_str().map(str::to_string),
+        plan_updated_at: plan.updated_at,
+        completed: false,
+    })
+}
+
+async fn patch_task(
+    client: &Client,
+    token: &str,
+    user_id_type: &str,
+    task_guid: &str,
+    plan: &PlanItem,
+    completed: bool,
+) -> AppResult<Option<String>> {
+    let timestamp = plan
+        .scheduled_at
+        .ok_or_else(|| AppError::Validation("没有时间的计划不能更新飞书待办".to_string()))?
+        .to_string();
+    let completed_at = if completed {
+        Utc::now().timestamp_millis().to_string()
+    } else {
+        "0".to_string()
+    };
+    let response = client
+        .patch(format!("{API_BASE}/task/v2/tasks/{task_guid}"))
+        .bearer_auth(token)
+        .query(&[("user_id_type", user_id_type)])
+        .json(&json!({
+            "task": {
+                "summary": truncate_chars(plan.title.trim(), 3_000),
+                "description": task_description(plan),
+                "start": { "timestamp": timestamp, "is_all_day": false },
+                "due": { "timestamp": timestamp, "is_all_day": false },
+                "reminders": [{ "relative_fire_minute": TASK_REMINDER_MINUTES }],
+                "completed_at": completed_at,
+            },
+            "update_fields": [
+                "summary", "description", "start", "due", "reminders", "completed_at"
+            ],
+        }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    Ok(payload["data"]["task"]["url"].as_str().map(str::to_string))
+}
+
+async fn complete_task(
+    client: &Client,
+    token: &str,
+    user_id_type: &str,
+    task_guid: &str,
+) -> AppResult<()> {
+    let response = client
+        .patch(format!("{API_BASE}/task/v2/tasks/{task_guid}"))
+        .bearer_auth(token)
+        .query(&[("user_id_type", user_id_type)])
+        .json(&json!({
+            "task": { "completed_at": Utc::now().timestamp_millis().to_string() },
+            "update_fields": ["completed_at"],
+        }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    checked_json(response).await.map(|_| ())
+}
+
+fn task_description(plan: &PlanItem) -> String {
+    let mut parts = vec![
+        format!("事项：{}", compact_content(plan)),
+        format!("详情：{}", plan.details.trim()),
+    ];
+    if let Some(notes) = plan
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("注意：{notes}"));
+    }
+    if let Some(link) = plan
+        .link_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("链接：{link}"));
+    }
+    if !plan.source_title.trim().is_empty() {
+        parts.push(format!("来源：{}", plan.source_title.trim()));
+    }
+    parts.push(format!("FeedNote 计划 ID：{}", plan.id));
+    truncate_chars(&parts.join("\n"), 3_000)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 async fn cleanup_legacy_plan_rows(database: &Database, secrets_path: &Path) -> AppResult<usize> {

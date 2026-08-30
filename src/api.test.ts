@@ -53,6 +53,7 @@ describe("browser preview data adapter", () => {
         mobilePushProvider: "ntfy",
         mobileReminderMinutes: 15,
         feishuSyncEnabled: false,
+        feishuTaskRemindersEnabled: false,
         feishuSourceEnabled: false,
         feishuSourceUrl: "",
       }),

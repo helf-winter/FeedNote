@@ -132,6 +132,7 @@ pub fn update_settings(input: UpdateSettingsInput, state: State<'_, AppState>) -
         mobile_push_provider: input.mobile_push_provider,
         mobile_reminder_minutes: input.mobile_reminder_minutes,
         feishu_sync_enabled: input.feishu_sync_enabled,
+        feishu_task_reminders_enabled: input.feishu_task_reminders_enabled,
         feishu_source_enabled: input.feishu_source_enabled,
         feishu_source_url: input.feishu_source_url,
     })
