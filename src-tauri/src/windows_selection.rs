@@ -30,14 +30,16 @@ use windows::{
                 IUIAutomationTextRange, TextPatternRangeEndpoint_End,
                 TextPatternRangeEndpoint_Start, TextUnit_Character, UIA_TextPatternId,
             },
-            WindowsAndMessaging::{GetCursorPos, GetForegroundWindow, GetWindowTextW},
+            WindowsAndMessaging::{
+                GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowTextW,
+                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+            },
         },
     },
 };
 
 const DOT_SIZE: i32 = 32;
-const DOT_OFFSET_X: i32 = 5;
-const DOT_OFFSET_Y: i32 = 4;
+const DOT_GAP: i32 = 6;
 const CONTEXT_RADIUS: i32 = 1_000;
 const MAX_SELECTED_CHARS: i32 = 4_000;
 const MAX_CONTEXT_CHARS: i32 = 6_000;
@@ -57,6 +59,14 @@ struct SelectionRect {
     top: f64,
     width: f64,
     height: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScreenBounds {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
 }
 
 pub fn start_watcher(app: tauri::AppHandle, suppressed: Arc<AtomicBool>) {
@@ -80,7 +90,7 @@ pub fn start_watcher(app: tauri::AppHandle, suppressed: Arc<AtomicBool>) {
             let selection = automation.selection_rect();
             match selection {
                 Some(rect) => {
-                    let position = dot_position(rect);
+                    let position = dot_position(rect, virtual_screen_bounds());
                     if last_position != Some(position) {
                         if let Some(window) = app.get_webview_window("capture-dot") {
                             let _ =
@@ -123,10 +133,26 @@ fn hide_dot(app: &tauri::AppHandle) {
     }
 }
 
-fn dot_position(rect: SelectionRect) -> (i32, i32) {
-    let x = (rect.left + rect.width + DOT_OFFSET_X as f64).round() as i32;
-    let y = (rect.top + rect.height - (DOT_SIZE / 2) as f64 + DOT_OFFSET_Y as f64).round() as i32;
-    (x, y)
+fn dot_position(rect: SelectionRect, screen: ScreenBounds) -> (i32, i32) {
+    let desired_x = rect.left.round() as i32 - DOT_SIZE - DOT_GAP;
+    let desired_y = rect.top.round() as i32 - DOT_SIZE - DOT_GAP;
+    let max_x = screen.left + screen.width - DOT_SIZE;
+    let max_y = screen.top + screen.height - DOT_SIZE;
+    (
+        desired_x.clamp(screen.left, max_x.max(screen.left)),
+        desired_y.clamp(screen.top, max_y.max(screen.top)),
+    )
+}
+
+fn virtual_screen_bounds() -> ScreenBounds {
+    unsafe {
+        ScreenBounds {
+            left: GetSystemMetrics(SM_XVIRTUALSCREEN),
+            top: GetSystemMetrics(SM_YVIRTUALSCREEN),
+            width: GetSystemMetrics(SM_CXVIRTUALSCREEN).max(DOT_SIZE),
+            height: GetSystemMetrics(SM_CYVIRTUALSCREEN).max(DOT_SIZE),
+        }
+    }
 }
 
 struct AutomationSession {
@@ -154,7 +180,14 @@ impl AutomationSession {
 
     fn selection_rect(&self) -> Option<SelectionRect> {
         let (_, range) = self.current_selection().ok()?;
-        bounding_rectangles(&range).ok()?.into_iter().last()
+        bounding_rectangles(&range)
+            .ok()?
+            .into_iter()
+            .min_by(|a, b| {
+                a.top
+                    .total_cmp(&b.top)
+                    .then_with(|| a.left.total_cmp(&b.left))
+            })
     }
 
     fn snapshot(&self) -> Result<SelectionSnapshot, String> {
@@ -323,15 +356,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dot_is_placed_after_selection_end() {
+    fn dot_is_placed_above_the_selection_start() {
         assert_eq!(
-            dot_position(SelectionRect {
-                left: 100.0,
-                top: 50.0,
-                width: 80.0,
-                height: 24.0,
-            }),
-            (185, 62)
+            dot_position(
+                SelectionRect {
+                    left: 100.0,
+                    top: 50.0,
+                    width: 80.0,
+                    height: 24.0,
+                },
+                ScreenBounds {
+                    left: 0,
+                    top: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            ),
+            (62, 12)
+        );
+    }
+
+    #[test]
+    fn dot_stays_inside_the_virtual_desktop() {
+        assert_eq!(
+            dot_position(
+                SelectionRect {
+                    left: -1918.0,
+                    top: 2.0,
+                    width: 80.0,
+                    height: 24.0,
+                },
+                ScreenBounds {
+                    left: -1920,
+                    top: 0,
+                    width: 3840,
+                    height: 1080,
+                },
+            ),
+            (-1920, 0)
         );
     }
 }
