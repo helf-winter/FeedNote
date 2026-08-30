@@ -1256,6 +1256,12 @@ async fn checked_json(response: reqwest::Response) -> AppResult<Value> {
         .unwrap_or(if status.is_success() { 0 } else { -1 });
     if !status.is_success() || code != 0 {
         let message = payload["msg"].as_str().unwrap_or("未知错误");
+        if code == 91403 {
+            return Err(AppError::FeishuUnavailable(
+                "许科AI助手可以读取目标表格，但没有该文档的编辑权限。请在表格‘分享’中将许科AI助手设为可编辑协作者后重试"
+                    .to_string(),
+            ));
+        }
         return Err(AppError::FeishuUnavailable(format!(
             "飞书接口返回 code={code}：{message}"
         )));
