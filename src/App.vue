@@ -15,6 +15,7 @@ import {
   Inbox,
   LoaderCircle,
   Menu,
+  NotebookPen,
   Plus,
   RefreshCw,
   Search,
@@ -121,6 +122,7 @@ const feishuSourceStatus = ref<FeishuSourceStatus>({
 const pageTitles: Record<Page, { title: string; subtitle: string }> = {
   inbox: { title: "收集箱", subtitle: "原样保存每一次输入，再慢慢理解" },
   memories: { title: "记忆", subtitle: "当前理解，以及它从哪里来" },
+  memo: { title: "备忘录", subtitle: "留给更长远的事情" },
   review: { title: "待澄清", subtitle: "只有无法可靠理解的内容才会停在这里" },
   settings: { title: "设置", subtitle: "模型、数据和隐私边界" },
 };
@@ -128,6 +130,7 @@ const pageTitles: Record<Page, { title: string; subtitle: string }> = {
 const navItems = [
   { id: "inbox" as const, label: "收集箱", icon: Inbox },
   { id: "memories" as const, label: "记忆", icon: BrainCircuit },
+  { id: "memo" as const, label: "备忘录", icon: NotebookPen },
   { id: "review" as const, label: "待澄清", icon: CircleAlert },
   { id: "settings" as const, label: "设置", icon: Settings },
 ];
@@ -599,6 +602,13 @@ function typeLabel(type: string): string {
             <span class="memory-source">{{ memory.sourceCount }} 个来源</span>
             <ChevronRight :size="18" />
           </button>
+        </div>
+      </section>
+
+      <section v-else-if="activePage === 'memo'" class="page memo-page">
+        <div class="empty-state">
+          <NotebookPen :size="28" />
+          <strong>还没有备忘内容</strong>
         </div>
       </section>
 

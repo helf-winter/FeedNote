@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 
-export type Page = "inbox" | "memories" | "review" | "settings";
+export type Page = "inbox" | "memories" | "memo" | "review" | "settings";
 
 export interface FeedEvent {
   id: string;
