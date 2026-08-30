@@ -16,7 +16,9 @@ const plan = ref<PlanItem | null>(null);
 const answer = ref("");
 const busy = ref(false);
 const error = ref("");
+const resultMessage = ref("");
 let unlisten: UnlistenFn | undefined;
+let closeTimer: number | undefined;
 
 onMounted(async () => {
   snapshot.value = await getCapturePreview();
@@ -25,13 +27,18 @@ onMounted(async () => {
     plan.value = null;
     answer.value = "";
     error.value = "";
+    resultMessage.value = "";
   });
 });
 
-onBeforeUnmount(() => unlisten?.());
+onBeforeUnmount(() => {
+  unlisten?.();
+  if (closeTimer) window.clearTimeout(closeTimer);
+});
 
 async function reject(): Promise<void> {
   if (busy.value) return;
+  clearCloseTimer();
   await discardCapture();
   reset();
 }
@@ -42,8 +49,14 @@ async function feed(): Promise<void> {
   error.value = "";
   try {
     const result = await commitCapture();
-    plan.value = result.plan;
-    if (!result.needsClarification) reset();
+    plan.value = result.plan ?? null;
+    if (!result.needsClarification) {
+      resultMessage.value = result.message;
+      closeTimer = window.setTimeout(async () => {
+        await discardCapture();
+        reset();
+      }, 1400);
+    }
   } catch (reason) {
     error.value = String(reason);
   } finally {
@@ -57,9 +70,12 @@ async function submitTime(): Promise<void> {
   error.value = "";
   try {
     const result = await resolvePlanTime(plan.value.id, answer.value.trim());
-    plan.value = result.plan;
+    plan.value = result.plan ?? null;
     answer.value = "";
-    if (!result.needsClarification) reset();
+    if (!result.needsClarification) {
+      resultMessage.value = result.message;
+      closeTimer = window.setTimeout(reset, 1000);
+    }
   } catch (reason) {
     error.value = String(reason);
   } finally {
@@ -68,10 +84,19 @@ async function submitTime(): Promise<void> {
 }
 
 function reset(): void {
+  clearCloseTimer();
   snapshot.value = null;
   plan.value = null;
   answer.value = "";
   error.value = "";
+  resultMessage.value = "";
+}
+
+function clearCloseTimer(): void {
+  if (closeTimer !== undefined) {
+    window.clearTimeout(closeTimer);
+    closeTimer = undefined;
+  }
 }
 </script>
 
@@ -79,13 +104,18 @@ function reset(): void {
   <section class="capture-popover" aria-label="选区投喂">
     <header>
       <div class="surface-mark"><CalendarClock :size="17" /></div>
-      <strong>{{ plan ? "安排时间" : "投喂选区" }}</strong>
+      <strong>{{ resultMessage ? "处理完成" : plan ? "安排时间" : "投喂选区" }}</strong>
       <button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="reject">
         <X :size="17" />
       </button>
     </header>
 
-    <template v-if="plan?.status === 'needs_clarification'">
+    <div v-if="resultMessage" class="capture-success">
+      <span><Check :size="20" /></span>
+      <strong>{{ resultMessage }}</strong>
+    </div>
+
+    <template v-else-if="plan?.status === 'needs_clarification'">
       <p class="question">{{ plan.clarificationQuestion }}</p>
       <form class="time-answer" @submit.prevent="submitTime">
         <input v-model="answer" maxlength="500" autofocus placeholder="例如：明天下午 3 点" />

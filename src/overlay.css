@@ -153,6 +153,30 @@
   line-height: 1.55;
 }
 
+.capture-success {
+  display: grid;
+  min-height: 108px;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.capture-success > span {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  color: white;
+  background: #1f7e75;
+  border-radius: 7px;
+}
+
+.capture-success > strong {
+  color: #38413c;
+  font-size: 12px;
+}
+
 .time-answer,
 .dock-time-answer > div {
   display: grid;
@@ -217,6 +241,8 @@
   border: 0;
   border-radius: 0;
   box-shadow: none;
+  touch-action: none;
+  user-select: none;
 }
 
 .dock-tab:hover {

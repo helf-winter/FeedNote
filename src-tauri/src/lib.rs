@@ -29,7 +29,6 @@ pub struct AppState {
     selection_suppressed: Arc<AtomicBool>,
     dock_expanded: AtomicBool,
     feishu_syncing: Arc<AtomicBool>,
-    feishu_source_syncing: Arc<AtomicBool>,
 }
 
 pub struct PendingCapture {
@@ -64,7 +63,6 @@ pub fn run() {
                 selection_suppressed: selection_suppressed.clone(),
                 dock_expanded: AtomicBool::new(false),
                 feishu_syncing: Arc::new(AtomicBool::new(false)),
-                feishu_source_syncing: Arc::new(AtomicBool::new(false)),
             });
 
             WebviewWindowBuilder::new(
@@ -133,12 +131,6 @@ pub fn run() {
                 state.secrets_path.clone(),
                 state.feishu_syncing.clone(),
             );
-            feishu_sync::start_source_scheduler(
-                state.database.clone(),
-                state.secrets_path.clone(),
-                state.feishu_source_syncing.clone(),
-            );
-
             let open_item = MenuItem::with_id(app, "open", "打开 FeedNote", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open_item, &quit_item])?;

@@ -28,6 +28,7 @@ const loading = ref(false);
 const error = ref("");
 const answers = reactive<Record<string, string>>({});
 let unlisten: UnlistenFn | undefined;
+let collapsedPointer: { id: number; x: number; y: number } | undefined;
 
 onMounted(async () => {
   await refresh();
@@ -55,9 +56,36 @@ async function startDockDrag(event: MouseEvent): Promise<void> {
   await getCurrentWindow().startDragging();
 }
 
-async function startCollapsedDockDrag(event: MouseEvent): Promise<void> {
+function prepareCollapsedDockDrag(event: PointerEvent): void {
   if (event.button !== 0) return;
+  collapsedPointer = { id: event.pointerId, x: event.screenX, y: event.screenY };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+async function continueCollapsedDockDrag(event: PointerEvent): Promise<void> {
+  if (!collapsedPointer || event.pointerId !== collapsedPointer.id) return;
+  const distance = Math.hypot(
+    event.screenX - collapsedPointer.x,
+    event.screenY - collapsedPointer.y,
+  );
+  if (distance < 6) return;
+
+  collapsedPointer = undefined;
+  const target = event.currentTarget as HTMLElement;
+  if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
   await getCurrentWindow().startDragging();
+}
+
+async function finishCollapsedDockPointer(event: PointerEvent): Promise<void> {
+  if (collapsedPointer?.id !== event.pointerId) return;
+  collapsedPointer = undefined;
+  const target = event.currentTarget as HTMLElement;
+  if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+  await toggle();
+}
+
+function cancelCollapsedDockPointer(event: PointerEvent): void {
+  if (collapsedPointer?.id === event.pointerId) collapsedPointer = undefined;
 }
 
 async function openLink(plan: PlanItem): Promise<void> {
@@ -132,8 +160,12 @@ function formatTime(timestamp?: number): string {
     class="dock-tab"
     type="button"
     aria-label="展开计划"
-    @mousedown="startCollapsedDockDrag"
-    @click="toggle"
+    @pointerdown="prepareCollapsedDockDrag"
+    @pointermove="continueCollapsedDockDrag"
+    @pointerup="finishCollapsedDockPointer"
+    @pointercancel="cancelCollapsedDockPointer"
+    @keydown.enter.prevent="toggle"
+    @keydown.space.prevent="toggle"
   >
     <span class="dock-logo"><CalendarClock :size="20" /></span>
     <span v-if="plans.length" class="plan-count">{{ Math.min(plans.length, 99) }}</span>

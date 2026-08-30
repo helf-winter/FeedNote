@@ -342,7 +342,7 @@ async function refreshFeishuSourceStatus(): Promise<void> {
 async function runFeishuSourceSync(): Promise<void> {
   if (feishuSourceState.value === "syncing") return;
   feishuSourceState.value = "syncing";
-  feishuSourceMessage.value = "正在读取并分析投递记录...";
+  feishuSourceMessage.value = "正在检查投递记录表...";
   try {
     await updateSettings(settings.value);
     feishuSourceMessage.value = await syncFeishuSourceNow();
@@ -690,7 +690,7 @@ function typeLabel(type: string): string {
 
         <div class="settings-section">
           <div class="settings-heading">
-            <div><h2>飞书分析来源</h2><p>只读分析投递记录，把可执行事项转成桌面计划。</p></div>
+            <div><h2>飞书投递记录</h2><p>由许科AI助手维护求职记录，不从表格反向创建计划。</p></div>
             <label class="toggle-control">
               <input v-model="settings.feishuSourceEnabled" type="checkbox" />
               <span aria-hidden="true" />
@@ -698,18 +698,17 @@ function typeLabel(type: string): string {
             </label>
           </div>
           <div class="form-grid" :class="{ muted: !settings.feishuSourceEnabled }">
-            <label class="wide-field"><span>来源表格链接</span><input v-model.trim="settings.feishuSourceUrl" type="url" :disabled="!settings.feishuSourceEnabled" placeholder="https://your-team.feishu.cn/sheets/..." /></label>
-            <label><span>识别结果</span><input :value="`${feishuSourceStatus.totalRows} 条记录 · ${feishuSourceStatus.actionableRows} 条可执行`" type="text" readonly /></label>
-            <label><span>计划映射</span><input :value="`${feishuSourceStatus.importedPlans} 条计划 · ${feishuSourceStatus.trackedRows} 条已跟踪`" type="text" readonly /></label>
-            <label><span>最近分析</span><input :value="feishuSourceStatus.lastSyncAt ? formatTime(feishuSourceStatus.lastSyncAt) : '尚未分析'" type="text" readonly /></label>
+            <label class="wide-field"><span>目标表格链接</span><input v-model.trim="settings.feishuSourceUrl" type="url" :disabled="!settings.feishuSourceEnabled" placeholder="https://your-team.feishu.cn/sheets/..." /></label>
+            <label><span>写入字段</span><input value="状态、公司/事项、岗位/方向、链接、备注" type="text" readonly /></label>
+            <label><span>写入策略</span><input value="链接或公司+岗位去重，命中则更新" type="text" readonly /></label>
           </div>
           <div class="settings-actions">
             <button class="secondary-button" type="button" :disabled="!settings.feishuSourceEnabled || !settings.feishuSourceUrl || feishuSourceState === 'syncing'" @click="runFeishuSourceSync">
               <LoaderCircle v-if="feishuSourceState === 'syncing'" class="spin" :size="16" />
-              <Search v-else :size="16" />立即分析
+              <Search v-else :size="16" />检查连接
             </button>
             <button v-if="settings.feishuSourceUrl" class="secondary-button" type="button" @click="openFeishuSource">
-              <Table2 :size="16" />打开来源表<ExternalLink :size="14" />
+              <Table2 :size="16" />打开投递表<ExternalLink :size="14" />
             </button>
             <button class="primary-button" type="button" @click="saveSettings"><Check :size="16" />保存设置</button>
           </div>
@@ -719,7 +718,7 @@ function typeLabel(type: string): string {
 
         <div class="settings-section">
           <div class="settings-heading">
-            <div><h2>飞书计划表</h2><p>将结构化计划维护到独立的飞书电子表格。</p></div>
+            <div><h2>飞书计划表</h2><p>由许科AI助手将真正的待办维护到独立表格。</p></div>
             <label class="toggle-control">
               <input v-model="settings.feishuSyncEnabled" type="checkbox" />
               <span aria-hidden="true" />
@@ -757,13 +756,13 @@ function typeLabel(type: string): string {
           <h2><ShieldCheck :size="19" />不可逾越的边界</h2>
           <ul>
             <li>原始投喂不会被 AI 修改或覆盖。</li>
-            <li>飞书分析来源只读，应用不会修改来源表的任何单元格。</li>
+            <li>投递表只在选区被高置信识别为求职记录时写入，不会反向扫描生成计划。</li>
             <li>模型输出必须经过 Memory Engine 校验后才能自动写入。</li>
             <li>仅将当前输入和必要的候选记忆发送至你授权的模型服务。</li>
             <li>密钥只从 data\\secrets.env 读取，不进入数据库、前端或导出文件。</li>
             <li>不监听剪贴板、键盘，也不扫描用户目录。</li>
             <li><Smartphone :size="14" />手机推送默认关闭，只发送计划卡片字段，不发送原文和周边上下文。</li>
-            <li><Cloud :size="14" />飞书同步默认关闭，只同步计划表固定列，本地保存不依赖飞书成功。</li>
+            <li><Cloud :size="14" />两个飞书通道独立开关、独立写入；关闭后不会向对应表格发起写请求。</li>
           </ul>
         </div>
       </section>

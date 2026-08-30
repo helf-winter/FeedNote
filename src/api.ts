@@ -137,7 +137,16 @@ export interface PlanItem {
 }
 
 export interface CaptureCommitResult {
-  plan: PlanItem;
+  destination: "memory" | "plan" | "application" | "application_and_plan";
+  message: string;
+  plan?: PlanItem;
+  applicationRecord?: {
+    action: "created" | "updated";
+    rowNumber: number;
+    sheetTitle: string;
+    company: string;
+    role?: string;
+  };
   needsClarification: boolean;
 }
 

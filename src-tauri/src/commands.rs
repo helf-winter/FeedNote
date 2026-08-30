@@ -18,6 +18,9 @@ use crate::{
     AppState, PendingCapture,
 };
 
+const PLAN_ROUTE_THRESHOLD: f64 = 0.68;
+const APPLICATION_ROUTE_THRESHOLD: f64 = 0.82;
+
 #[tauri::command]
 pub fn create_feed(
     input: CreateFeedInput,
@@ -163,12 +166,7 @@ pub fn get_feishu_source_status(state: State<'_, AppState>) -> AppResult<FeishuS
 
 #[tauri::command]
 pub async fn sync_feishu_source_now(state: State<'_, AppState>) -> AppResult<String> {
-    feishu_sync::sync_source_now(
-        &state.database,
-        &state.secrets_path,
-        &state.feishu_source_syncing,
-    )
-    .await
+    feishu_sync::check_application_target(&state.database, &state.secrets_path).await
 }
 
 #[tauri::command]
@@ -324,7 +322,7 @@ pub async fn commit_capture(
         ));
     }
     let secrets = ai::ProviderSecrets::load(&state.secrets_path)?;
-    let proposal = ai::propose_plan(
+    let routing = ai::route_capture(
         &settings,
         &secrets,
         &snapshot.selected_text,
@@ -332,13 +330,42 @@ pub async fn commit_capture(
         &now_in_shanghai(),
     )
     .await?;
-    let scheduled_at = parse_scheduled_at(proposal.scheduled_for.as_deref())?;
-    let plan = state.database.create_plan(
-        &feed.feed_id,
-        &proposal,
-        scheduled_at,
-        &snapshot.source_title,
-    )?;
+
+    let application_route_accepted = routing.write_application_record
+        && routing.application_confidence >= APPLICATION_ROUTE_THRESHOLD;
+    let application_channel_ready =
+        settings.feishu_source_enabled && !settings.feishu_source_url.trim().is_empty();
+    let should_write_application = application_route_accepted && application_channel_ready;
+    let should_create_plan = routing.create_plan && routing.plan_confidence >= PLAN_ROUTE_THRESHOLD;
+    let application_record = if should_write_application {
+        Some(
+            feishu_sync::write_application_record(
+                &state.database,
+                &state.secrets_path,
+                routing.application_record.as_ref().ok_or_else(|| {
+                    crate::error::AppError::AiInvalid("投递记录路由缺少结构化内容".to_string())
+                })?,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let (plan, scheduled_at) = if should_create_plan {
+        let proposal = routing.plan.as_ref().ok_or_else(|| {
+            crate::error::AppError::AiInvalid("计划路由缺少结构化内容".to_string())
+        })?;
+        let scheduled_at = parse_scheduled_at(proposal.scheduled_for.as_deref())?;
+        let plan = state.database.create_plan(
+            &feed.feed_id,
+            proposal,
+            scheduled_at,
+            &snapshot.source_title,
+        )?;
+        (Some(plan), scheduled_at)
+    } else {
+        (None, None)
+    };
 
     let database = state.database.clone();
     let secrets_path = state.secrets_path.clone();
@@ -347,17 +374,39 @@ pub async fn commit_capture(
         let _ = process_feed_inner(&database, &secrets_path, &feed_id).await;
     });
 
-    let _ = app.emit("plans-changed", &plan);
+    if let Some(plan) = &plan {
+        let _ = app.emit("plans-changed", plan);
+    }
     *state
         .pending_capture
         .lock()
         .expect("pending capture lock poisoned") = None;
-    if scheduled_at.is_some() {
-        close_capture_menu(&app, &state);
+    let destination = match (application_record.is_some(), plan.is_some()) {
+        (true, true) => "application_and_plan",
+        (true, false) => "application",
+        (false, true) => "plan",
+        (false, false) => "memory",
+    };
+    let mut message = match destination {
+        "application_and_plan" => "已写入投递记录，并创建桌面计划",
+        "application" => "已写入飞书投递记录表",
+        "plan" => "已创建桌面计划",
+        _ if application_route_accepted => "已保存到记忆库",
+        _ if routing.write_application_record => "投递判断未达到写入阈值，已安全保存到记忆库",
+        _ if routing.create_plan => "计划判断未达到创建阈值，已安全保存到记忆库",
+        _ => "未识别为待办或投递记录，已保存到记忆库",
     }
+    .to_string();
+    if application_route_accepted && !application_channel_ready {
+        message.push_str("；投递记录同步未开启，本次未写入投递表");
+    }
+    let needs_clarification = plan.is_some() && scheduled_at.is_none();
     Ok(CaptureCommitResult {
-        needs_clarification: scheduled_at.is_none(),
+        destination: destination.to_string(),
+        message,
         plan,
+        application_record,
+        needs_clarification,
     })
 }
 
@@ -398,8 +447,15 @@ pub async fn resolve_plan_time(
         close_capture_menu(&app, &state);
     }
     Ok(CaptureCommitResult {
+        destination: "plan".to_string(),
+        message: if scheduled_at.is_some() {
+            "计划时间已补充".to_string()
+        } else {
+            "仍需补充计划时间".to_string()
+        },
         needs_clarification: scheduled_at.is_none(),
-        plan,
+        plan: Some(plan),
+        application_record: None,
     })
 }
 

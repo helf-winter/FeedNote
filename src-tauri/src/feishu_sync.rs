@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    hash::{Hash, Hasher},
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -9,17 +8,16 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{FixedOffset, TimeZone, Utc};
 use reqwest::{Client, Url};
 use serde_json::{json, Value};
 
 use crate::{
-    ai,
     db::Database,
     error::{AppError, AppResult},
     models::{
-        FeishuSheetState, FeishuSourceState, FeishuSourceStatus, FeishuSyncStatus, PlanItem,
-        PlanProposal,
+        ApplicationRecordProposal, ApplicationWriteResult, FeishuSheetState, FeishuSourceStatus,
+        FeishuSyncStatus, PlanItem,
     },
     secrets::parse_env,
 };
@@ -93,35 +91,6 @@ pub fn start_scheduler(
     });
 }
 
-pub fn start_source_scheduler(
-    database: Arc<Database>,
-    secrets_path: std::path::PathBuf,
-    syncing: Arc<AtomicBool>,
-) {
-    tauri::async_runtime::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5 * 60));
-        loop {
-            interval.tick().await;
-            let settings = match database.get_settings() {
-                Ok(settings) => settings,
-                Err(_) => continue,
-            };
-            if settings.feishu_source_enabled {
-                if let Some(_guard) = SyncGuard::acquire(&syncing) {
-                    match sync_source(&database, &secrets_path).await {
-                        Ok(_) => {
-                            let _ = database.save_feishu_source_error(None);
-                        }
-                        Err(error) => {
-                            let _ = database.save_feishu_source_error(Some(&error.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
 pub fn status(database: &Database, secrets_path: &Path) -> AppResult<FeishuSyncStatus> {
     let settings = database.get_settings()?;
     let state = database.get_feishu_sheet_state()?;
@@ -160,43 +129,19 @@ pub async fn sync_now(
 
 pub fn source_status(database: &Database, secrets_path: &Path) -> AppResult<FeishuSourceStatus> {
     let settings = database.get_settings()?;
-    let state = database.get_feishu_source_state()?;
     Ok(FeishuSourceStatus {
         enabled: settings.feishu_source_enabled,
         configured: FeishuSecrets::is_configured(secrets_path)
             && !settings.feishu_source_url.trim().is_empty(),
         spreadsheet_url: settings.feishu_source_url,
-        sheet_title: state.as_ref().map(|value| value.sheet_title.clone()),
-        total_rows: state.as_ref().map_or(0, |value| value.total_rows),
-        actionable_rows: state.as_ref().map_or(0, |value| value.actionable_rows),
-        tracked_rows: state.as_ref().map_or(0, |value| value.tracked_rows),
-        imported_plans: state.as_ref().map_or(0, |value| value.imported_plans),
-        last_sync_at: state.map(|value| value.last_sync_at),
-        last_error: database.get_feishu_source_error()?,
+        sheet_title: None,
+        total_rows: 0,
+        actionable_rows: 0,
+        tracked_rows: 0,
+        imported_plans: 0,
+        last_sync_at: None,
+        last_error: None,
     })
-}
-
-pub async fn sync_source_now(
-    database: &Database,
-    secrets_path: &Path,
-    syncing: &AtomicBool,
-) -> AppResult<String> {
-    let _guard = SyncGuard::acquire(syncing)
-        .ok_or_else(|| AppError::FeishuUnavailable("来源分析正在进行，请稍后查看".to_string()))?;
-    let result = match sync_source(database, secrets_path).await {
-        Ok(result) => {
-            database.save_feishu_source_error(None)?;
-            result
-        }
-        Err(error) => {
-            database.save_feishu_source_error(Some(&error.to_string()))?;
-            return Err(error);
-        }
-    };
-    Ok(format!(
-        "已分析 {} 条投递记录，识别 {} 条可执行事项，本次新增 {} 条、更新 {} 条计划",
-        result.total_rows, result.actionable_rows, result.created, result.updated
-    ))
 }
 
 struct SyncGuard<'a>(&'a AtomicBool);
@@ -218,9 +163,6 @@ impl Drop for SyncGuard<'_> {
 #[derive(Debug)]
 struct SourceRow {
     row_number: usize,
-    source_key: String,
-    row_hash: String,
-    status: String,
     company: String,
     role: String,
     link: Option<String>,
@@ -229,29 +171,106 @@ struct SourceRow {
 
 #[derive(Debug)]
 struct SourceSheet {
+    sheet_id: String,
     title: String,
     rows: Vec<SourceRow>,
 }
 
-#[derive(Debug, Default)]
-struct SourceSyncResult {
-    total_rows: usize,
-    actionable_rows: usize,
-    created: usize,
-    updated: usize,
+pub async fn write_application_record(
+    database: &Database,
+    secrets_path: &Path,
+    proposal: &ApplicationRecordProposal,
+) -> AppResult<ApplicationWriteResult> {
+    validate_application_record(proposal)?;
+    let settings = database.get_settings()?;
+    if !settings.feishu_source_enabled {
+        return Err(AppError::Validation(
+            "已识别为投递记录，但飞书投递记录写入尚未开启".to_string(),
+        ));
+    }
+    if settings.feishu_source_url.trim().is_empty() {
+        return Err(AppError::Validation(
+            "已识别为投递记录，但尚未配置目标飞书表格".to_string(),
+        ));
+    }
+    crate::db::validate_feishu_source_url(&settings.feishu_source_url)?;
+
+    let spreadsheet_token = source_token(&settings.feishu_source_url)?;
+    let secrets = FeishuSecrets::load(secrets_path)?;
+    let client = client()?;
+    let token = tenant_access_token(&client, &secrets).await?;
+    let source = read_source_sheet(&client, &token, &spreadsheet_token).await?;
+    let existing = source
+        .rows
+        .iter()
+        .find(|row| application_row_matches(row, proposal));
+
+    let state = FeishuSheetState {
+        spreadsheet_token: spreadsheet_token.clone(),
+        sheet_id: source.sheet_id.clone(),
+        spreadsheet_url: settings.feishu_source_url,
+    };
+    let (action, expected_row) = if let Some(row) = existing {
+        let values = merged_application_row(row, proposal);
+        write_values(
+            &client,
+            &token,
+            &state,
+            &format!("A{}:E{}", row.row_number, row.row_number),
+            vec![values],
+        )
+        .await?;
+        ("updated", row.row_number)
+    } else {
+        let fallback_row = source
+            .rows
+            .iter()
+            .map(|row| row.row_number)
+            .max()
+            .unwrap_or(1)
+            + 1;
+        let row = application_row(proposal);
+        let row_number = append_application_values(&client, &token, &state, vec![row])
+            .await?
+            .unwrap_or(fallback_row);
+        ("created", row_number)
+    };
+
+    let verified = read_source_sheet(&client, &token, &spreadsheet_token).await?;
+    let verified_row = verified
+        .rows
+        .iter()
+        .find(|row| application_row_matches(row, proposal))
+        .ok_or_else(|| {
+            AppError::FeishuUnavailable("投递记录写入后回读校验失败，请重试".to_string())
+        })?;
+    Ok(ApplicationWriteResult {
+        action: action.to_string(),
+        row_number: if action == "updated" {
+            expected_row
+        } else {
+            verified_row.row_number
+        },
+        sheet_title: verified.title,
+        company: proposal.company.trim().to_string(),
+        role: proposal
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SourceDisposition {
-    DirectAction,
-    NoteAction,
-    Passive,
-}
-
-async fn sync_source(database: &Database, secrets_path: &Path) -> AppResult<SourceSyncResult> {
+pub async fn check_application_target(
+    database: &Database,
+    secrets_path: &Path,
+) -> AppResult<String> {
     let settings = database.get_settings()?;
     if settings.feishu_source_url.trim().is_empty() {
-        return Err(AppError::Validation("请先填写飞书分析来源链接".to_string()));
+        return Err(AppError::Validation(
+            "请先填写飞书投递记录表链接".to_string(),
+        ));
     }
     crate::db::validate_feishu_source_url(&settings.feishu_source_url)?;
     let spreadsheet_token = source_token(&settings.feishu_source_url)?;
@@ -259,106 +278,11 @@ async fn sync_source(database: &Database, secrets_path: &Path) -> AppResult<Sour
     let client = client()?;
     let token = tenant_access_token(&client, &secrets).await?;
     let source = read_source_sheet(&client, &token, &spreadsheet_token).await?;
-    let mut result = SourceSyncResult {
-        total_rows: source.rows.len(),
-        ..Default::default()
-    };
-    let mut tracked_rows = 0;
-    let mut imported_plans = 0;
-    let provider_secrets = if settings.ai_enabled {
-        Some(ai::ProviderSecrets::load(secrets_path)?)
-    } else {
-        None
-    };
-
-    for row in &source.rows {
-        let disposition = source_disposition(row);
-        let actionable = matches!(
-            disposition,
-            SourceDisposition::DirectAction | SourceDisposition::NoteAction
-        );
-        if actionable {
-            result.actionable_rows += 1;
-        }
-        let existing = database.get_feishu_source_entry(&row.source_key)?;
-        if existing
-            .as_ref()
-            .is_some_and(|entry| entry.row_hash == row.row_hash)
-        {
-            tracked_rows += 1;
-            if existing.and_then(|entry| entry.plan_id).is_some() {
-                imported_plans += 1;
-            }
-            continue;
-        }
-
-        if !actionable {
-            if let Some(plan_id) = existing.as_ref().and_then(|entry| entry.plan_id.as_deref()) {
-                database.complete_feishu_source_plan(plan_id)?;
-                result.updated += 1;
-                imported_plans += 1;
-            }
-            database.save_feishu_source_entry(
-                &row.source_key,
-                &row.row_hash,
-                existing.as_ref().and_then(|entry| entry.plan_id.as_deref()),
-            )?;
-            tracked_rows += 1;
-            continue;
-        }
-
-        let proposal = match disposition {
-            SourceDisposition::DirectAction if !has_action_note(row.notes.as_deref()) => {
-                direct_source_plan(row)
-            }
-            _ => {
-                let provider = provider_secrets.as_ref().ok_or_else(|| {
-                    AppError::Validation("AI 已关闭，无法分析飞书备注中的安排".to_string())
-                })?;
-                ai::propose_feishu_source_plan(
-                    &settings,
-                    provider,
-                    &source_row_text(row),
-                    &current_shanghai_time(),
-                )
-                .await?
-            }
-        };
-        let scheduled_at = proposal
-            .scheduled_for
-            .as_deref()
-            .map(parse_source_time)
-            .transpose()?;
-        let source_title = format!("飞书{}·第 {} 行", source.title, row.row_number);
-        if let Some(plan_id) = existing.as_ref().and_then(|entry| entry.plan_id.as_deref()) {
-            database.update_feishu_source_plan(plan_id, &proposal, scheduled_at, &source_title)?;
-            database.save_feishu_source_entry(&row.source_key, &row.row_hash, Some(plan_id))?;
-            result.updated += 1;
-        } else {
-            database.create_feishu_source_plan(
-                &row.source_key,
-                &row.row_hash,
-                &source_row_text(row),
-                &proposal,
-                scheduled_at,
-                &source_title,
-            )?;
-            result.created += 1;
-        }
-        tracked_rows += 1;
-        imported_plans += 1;
-    }
-
-    database.save_feishu_source_state(&FeishuSourceState {
-        spreadsheet_url: settings.feishu_source_url,
-        sheet_title: source.title,
-        total_rows: result.total_rows,
-        actionable_rows: result.actionable_rows,
-        tracked_rows,
-        imported_plans,
-        last_sync_at: Utc::now().timestamp_millis(),
-    })?;
-    Ok(result)
+    Ok(format!(
+        "已连接‘{}’，当前有 {} 条投递记录",
+        source.title,
+        source.rows.len()
+    ))
 }
 
 async fn read_source_sheet(
@@ -418,12 +342,11 @@ async fn read_source_sheet(
             .position(|cell| cell_text(cell).trim() == name)
             .ok_or_else(|| AppError::FeishuUnavailable(format!("来源表缺少‘{name}’列")))
     };
-    let status_col = column("状态")?;
+    column("状态")?;
     let company_col = column("公司/事项")?;
     let role_col = column("岗位/方向")?;
     let link_col = column("链接")?;
     let notes_col = column("备注")?;
-    let mut occurrences = HashMap::<String, usize>::new();
     let mut rows = Vec::new();
     for (index, value) in values.iter().enumerate().skip(1) {
         let Some(cells) = value.as_array() else {
@@ -434,120 +357,204 @@ async fn read_source_sheet(
         if company.is_empty() {
             continue;
         }
-        let status = get(status_col).trim().to_string();
         let role = get(role_col).trim().to_string();
         let link = nonempty(get(link_col));
         let notes = nonempty(get(notes_col));
-        let identity = format!("{}|{}", company.to_lowercase(), role.to_lowercase());
-        let occurrence = occurrences.entry(identity.clone()).or_insert(0);
-        *occurrence += 1;
-        let source_key = format!("{spreadsheet_token}|{identity}|{occurrence}");
-        let row_hash = source_row_hash(&status, &company, &role, link.as_deref(), notes.as_deref());
         rows.push(SourceRow {
             row_number: index + 1,
-            source_key,
-            row_hash,
-            status,
             company,
             role,
             link,
             notes,
         });
     }
-    Ok(SourceSheet { title, rows })
+    Ok(SourceSheet {
+        sheet_id,
+        title,
+        rows,
+    })
 }
 
-fn source_disposition(row: &SourceRow) -> SourceDisposition {
-    if has_action_note(row.notes.as_deref()) {
-        SourceDisposition::NoteAction
-    } else if [
+fn validate_application_record(proposal: &ApplicationRecordProposal) -> AppResult<()> {
+    const STATUSES: [&str; 7] = [
         "待投递",
-        "待笔试",
-        "待面试",
-        "待测评",
+        "简历筛选",
         "笔试",
         "面试",
-        "测评",
-    ]
-    .iter()
-    .any(|status| row.status.contains(status))
+        "Offer",
+        "已结束",
+        "待确认",
+    ];
+    if !STATUSES.contains(&proposal.status.trim()) {
+        return Err(AppError::AiInvalid("投递状态不在允许范围内".to_string()));
+    }
+    let company = proposal.company.trim();
+    if company.is_empty() || company.chars().count() > 200 {
+        return Err(AppError::AiInvalid("公司/事项为空或过长".to_string()));
+    }
+    if proposal
+        .role
+        .as_deref()
+        .is_some_and(|value| value.chars().count() > 200)
     {
-        SourceDisposition::DirectAction
-    } else {
-        SourceDisposition::Passive
+        return Err(AppError::AiInvalid("岗位/方向过长".to_string()));
     }
+    if proposal
+        .notes
+        .as_deref()
+        .is_some_and(|value| value.chars().count() > 2_000)
+    {
+        return Err(AppError::AiInvalid("投递备注过长".to_string()));
+    }
+    if let Some(link) = proposal.link_url.as_deref() {
+        let url = Url::parse(link.trim())
+            .map_err(|_| AppError::AiInvalid("投递链接不是有效 URL".to_string()))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(AppError::AiInvalid("投递链接只允许 HTTP/HTTPS".to_string()));
+        }
+    }
+    Ok(())
 }
 
-fn has_action_note(notes: Option<&str>) -> bool {
-    let notes = notes.unwrap_or_default();
+fn application_row_matches(row: &SourceRow, proposal: &ApplicationRecordProposal) -> bool {
+    let proposed_link = proposal
+        .link_url
+        .as_deref()
+        .map(normalize_value)
+        .filter(|value| !value.is_empty());
+    if proposed_link.is_some()
+        && row.link.as_deref().map(normalize_value).as_ref() == proposed_link.as_ref()
+    {
+        return true;
+    }
+    let same_company = normalize_value(&row.company) == normalize_value(&proposal.company);
+    let proposed_role = proposal
+        .role
+        .as_deref()
+        .map(normalize_value)
+        .unwrap_or_default();
+    same_company && !proposed_role.is_empty() && normalize_value(&row.role) == proposed_role
+}
+
+fn normalize_value(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn application_row(proposal: &ApplicationRecordProposal) -> Vec<Value> {
     [
-        "投", "笔试", "面试", "测评", "完成", "截止", "之前", "提醒", "安排",
+        proposal.status.trim().to_string(),
+        proposal.company.trim().to_string(),
+        proposal
+            .role
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        proposal
+            .link_url
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        proposal
+            .notes
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     ]
-    .iter()
-    .any(|keyword| notes.contains(keyword))
+    .into_iter()
+    .map(|value| json!(safe_cell(&value)))
+    .collect()
 }
 
-fn direct_source_plan(row: &SourceRow) -> PlanProposal {
-    let kind = if row.status.contains("投递") {
-        "投递"
-    } else if row.status.contains("笔试") {
-        "笔试"
-    } else if row.status.contains("面试") {
-        "面试"
-    } else {
-        "测评"
-    };
-    let role = if row.role.is_empty() {
-        String::new()
-    } else {
-        format!("·{}", row.role)
-    };
-    PlanProposal {
-        title: format!("{}{}{}", row.company, role, kind)
-            .chars()
-            .take(36)
-            .collect(),
-        details: format!("{}的{}事项，当前状态：{}。", row.company, kind, row.status),
-        content: kind.to_string(),
-        link_url: row.link.clone(),
-        notes: row.notes.clone(),
-        scheduled_for: None,
-        time_evidence: None,
-        needs_clarification: true,
-        clarification_question: Some(format!("准备什么时候处理{}的{}？", row.company, kind)),
+fn merged_application_row(
+    existing: &SourceRow,
+    proposal: &ApplicationRecordProposal,
+) -> Vec<Value> {
+    let role = proposal
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&existing.role);
+    let link = proposal
+        .link_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(existing.link.as_deref())
+        .unwrap_or_default();
+    let notes = merge_notes(existing.notes.as_deref(), proposal.notes.as_deref());
+    [
+        proposal.status.trim(),
+        proposal.company.trim(),
+        role,
+        link,
+        notes.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .map(|value| json!(safe_cell(value)))
+    .collect()
+}
+
+fn merge_notes(existing: Option<&str>, incoming: Option<&str>) -> Option<String> {
+    let existing = existing.map(str::trim).filter(|value| !value.is_empty());
+    let incoming = incoming.map(str::trim).filter(|value| !value.is_empty());
+    match (existing, incoming) {
+        (Some(left), Some(right)) if left != right && !left.contains(right) => {
+            Some(format!("{left}；{right}"))
+        }
+        (Some(left), _) => Some(left.to_string()),
+        (None, Some(right)) => Some(right.to_string()),
+        (None, None) => None,
     }
 }
 
-fn source_row_text(row: &SourceRow) -> String {
-    format!(
-        "状态：{}\n公司/事项：{}\n岗位/方向：{}\n链接：{}\n备注：{}",
-        row.status,
-        row.company,
-        if row.role.is_empty() {
-            "未填写"
-        } else {
-            &row.role
-        },
-        row.link.as_deref().unwrap_or("未填写"),
-        row.notes.as_deref().unwrap_or("未填写")
-    )
+async fn append_application_values(
+    client: &Client,
+    token: &str,
+    state: &FeishuSheetState,
+    values: Vec<Vec<Value>>,
+) -> AppResult<Option<usize>> {
+    let response = client
+        .post(format!(
+            "{API_BASE}/sheets/v2/spreadsheets/{}/values_append?insertDataOption=INSERT_ROWS",
+            state.spreadsheet_token
+        ))
+        .bearer_auth(token)
+        .json(&json!({
+            "valueRange": {
+                "range": format!("{}!A:E", state.sheet_id),
+                "values": values,
+            }
+        }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let updated_range = payload
+        .pointer("/data/updates/updatedRange")
+        .or_else(|| payload.pointer("/data/updates/updated_range"))
+        .and_then(Value::as_str);
+    Ok(updated_range.and_then(last_row_from_range))
 }
 
-fn source_row_hash(
-    status: &str,
-    company: &str,
-    role: &str,
-    link: Option<&str>,
-    notes: Option<&str>,
-) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    "feishu-source-v2".hash(&mut hasher);
-    status.hash(&mut hasher);
-    company.hash(&mut hasher);
-    role.hash(&mut hasher);
-    link.hash(&mut hasher);
-    notes.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+fn last_row_from_range(range: &str) -> Option<usize> {
+    range
+        .rsplit_once(':')
+        .map(|(_, end)| end)
+        .unwrap_or(range)
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 fn cell_text(value: &Value) -> String {
@@ -589,17 +596,6 @@ fn source_token(value: &str) -> AppResult<String> {
         .map(|parts| parts[1].to_string())
         .filter(|token| !token.is_empty())
         .ok_or_else(|| AppError::Validation("飞书来源链接缺少表格 token".to_string()))
-}
-
-fn parse_source_time(value: &str) -> AppResult<i64> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|value| value.timestamp_millis())
-        .map_err(|_| AppError::AiInvalid("飞书来源计划时间不是有效 RFC3339".to_string()))
-}
-
-fn current_shanghai_time() -> String {
-    let offset = FixedOffset::east_opt(8 * 60 * 60).expect("valid Shanghai offset");
-    Utc::now().with_timezone(&offset).to_rfc3339()
 }
 
 async fn sync_pending(database: &Database, secrets_path: &Path) -> AppResult<usize> {
@@ -935,16 +931,27 @@ fn network_error(error: reqwest::Error) -> AppError {
 mod tests {
     use super::*;
 
-    fn source_row(status: &str, notes: Option<&str>) -> SourceRow {
+    fn source_row(notes: Option<&str>) -> SourceRow {
         SourceRow {
             row_number: 2,
-            source_key: "sheet|company|role|1".to_string(),
-            row_hash: "hash".to_string(),
-            status: status.to_string(),
             company: "示例公司".to_string(),
             role: "前端工程师".to_string(),
             link: Some("https://example.com/apply".to_string()),
             notes: notes.map(str::to_string),
+        }
+    }
+
+    fn application(
+        company: &str,
+        role: Option<&str>,
+        link: Option<&str>,
+    ) -> ApplicationRecordProposal {
+        ApplicationRecordProposal {
+            status: "待投递".to_string(),
+            company: company.to_string(),
+            role: role.map(str::to_string),
+            link_url: link.map(str::to_string),
+            notes: None,
         }
     }
 
@@ -962,27 +969,48 @@ mod tests {
     }
 
     #[test]
-    fn source_status_and_notes_only_create_actionable_plans() {
+    fn application_rows_match_by_link_or_company_and_role() {
+        let row = source_row(None);
+        assert!(application_row_matches(
+            &row,
+            &application(
+                "另一家公司",
+                Some("后端工程师"),
+                Some("https://example.com/apply")
+            )
+        ));
+        assert!(application_row_matches(
+            &row,
+            &application("示例公司", Some("前端工程师"), None)
+        ));
+        assert!(!application_row_matches(
+            &row,
+            &application("示例公司", None, None)
+        ));
+    }
+
+    #[test]
+    fn merging_application_notes_preserves_existing_context() {
         assert_eq!(
-            source_disposition(&source_row("待笔试", None)),
-            SourceDisposition::DirectAction
+            merge_notes(Some("官网投递"), Some("内推码 123")),
+            Some("官网投递；内推码 123".to_string())
         );
         assert_eq!(
-            source_disposition(&source_row("简历筛选", None)),
-            SourceDisposition::Passive
-        );
-        assert_eq!(
-            source_disposition(&source_row("已挂", Some("搁三天再投另一个"))),
-            SourceDisposition::NoteAction
+            merge_notes(Some("官网投递"), Some("官网投递")),
+            Some("官网投递".to_string())
         );
     }
 
     #[test]
-    fn direct_source_plan_never_invents_a_time() {
-        let proposal = direct_source_plan(&source_row("待投递", None));
-        assert!(proposal.needs_clarification);
-        assert!(proposal.scheduled_for.is_none());
-        assert_eq!(proposal.content, "投递");
+    fn application_record_requires_supported_status_and_company() {
+        assert!(
+            validate_application_record(&application("示例公司", Some("前端工程师"), None)).is_ok()
+        );
+        let mut invalid = application("", Some("前端工程师"), None);
+        assert!(validate_application_record(&invalid).is_err());
+        invalid.company = "示例公司".to_string();
+        invalid.status = "自动创建计划".to_string();
+        assert!(validate_application_record(&invalid).is_err());
     }
 
     #[test]

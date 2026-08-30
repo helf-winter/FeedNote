@@ -182,6 +182,38 @@ pub struct PlanProposal {
     pub clarification_question: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationRecordProposal {
+    pub status: String,
+    pub company: String,
+    pub role: Option<String>,
+    pub link_url: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureRoutingProposal {
+    pub create_plan: bool,
+    pub plan_confidence: f64,
+    pub write_application_record: bool,
+    pub application_confidence: f64,
+    pub reason: String,
+    pub plan: Option<PlanProposal>,
+    pub application_record: Option<ApplicationRecordProposal>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationWriteResult {
+    pub action: String,
+    pub row_number: usize,
+    pub sheet_title: String,
+    pub company: String,
+    pub role: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanItem {
@@ -220,24 +252,6 @@ pub struct FeishuSyncStatus {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct FeishuSourceState {
-    pub spreadsheet_url: String,
-    pub sheet_title: String,
-    pub total_rows: usize,
-    pub actionable_rows: usize,
-    pub tracked_rows: usize,
-    pub imported_plans: usize,
-    pub last_sync_at: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct FeishuSourceEntry {
-    pub row_hash: String,
-    pub plan_id: Option<String>,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuSourceStatus {
@@ -256,6 +270,9 @@ pub struct FeishuSourceStatus {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureCommitResult {
-    pub plan: PlanItem,
+    pub destination: String,
+    pub message: String,
+    pub plan: Option<PlanItem>,
+    pub application_record: Option<ApplicationWriteResult>,
     pub needs_clarification: bool,
 }

@@ -9,8 +9,7 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, FeedEvent, FeishuSheetState,
-        FeishuSourceEntry, FeishuSourceState, MemoryDetail, MemorySummary, MemoryVersion, PlanItem,
-        PlanProposal, ReviewItem, Stats,
+        MemoryDetail, MemorySummary, MemoryVersion, PlanItem, PlanProposal, ReviewItem, Stats,
     },
 };
 
@@ -346,79 +345,6 @@ impl Database {
         self.get_plan_locked(&connection, &id)
     }
 
-    pub fn create_feishu_source_plan(
-        &self,
-        source_key: &str,
-        row_hash: &str,
-        raw_content: &str,
-        proposal: &PlanProposal,
-        scheduled_at: Option<i64>,
-        source_title: &str,
-    ) -> AppResult<PlanItem> {
-        validate_plan_proposal(proposal, scheduled_at)?;
-        let now = Utc::now().timestamp_millis();
-        let feed_id = Uuid::new_v4().to_string();
-        let plan_id = Uuid::new_v4().to_string();
-        let status = if scheduled_at.is_some() {
-            "scheduled"
-        } else {
-            "needs_clarification"
-        };
-        let mut connection = self.connection.lock().expect("database lock poisoned");
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO feed_events
-             (id, raw_content, source_type, source_metadata, processing_status, created_at)
-             VALUES (?1, ?2, 'feishu_sheet', ?3, 'classified', ?4)",
-            params![
-                feed_id,
-                raw_content,
-                json!({ "sourceTitle": truncate(source_title, 500) }).to_string(),
-                now
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO plans
-             (id, feed_event_id, title, details, content, link_url, notes, scheduled_at, status,
-              clarification_question, source_title, created_at, updated_at, reminded_at,
-              feishu_synced_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, NULL, NULL)",
-            params![
-                plan_id,
-                feed_id,
-                proposal.title.trim(),
-                proposal.details.trim(),
-                proposal.content.trim(),
-                proposal.link_url.as_deref().map(str::trim),
-                proposal.notes.as_deref().map(str::trim),
-                scheduled_at,
-                status,
-                proposal.clarification_question.as_deref(),
-                truncate(source_title, 500),
-                now,
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO feishu_source_rows (source_key, row_hash, plan_id, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(source_key) DO UPDATE SET
-                row_hash = excluded.row_hash,
-                plan_id = excluded.plan_id,
-                last_seen_at = excluded.last_seen_at",
-            params![source_key, row_hash, plan_id, now],
-        )?;
-        insert_audit(
-            &transaction,
-            "ai",
-            "create_from_feishu_sheet",
-            "plan",
-            &plan_id,
-            json!({ "sourceTitle": truncate(source_title, 500) }),
-        )?;
-        transaction.commit()?;
-        self.get_plan_locked(&connection, &plan_id)
-    }
-
     pub fn list_plans(&self, include_done: bool) -> AppResult<Vec<PlanItem>> {
         let connection = self.connection.lock().expect("database lock poisoned");
         let mut statement = connection.prepare(
@@ -626,147 +552,6 @@ impl Database {
             )?;
         } else {
             connection.execute("DELETE FROM settings WHERE key = 'feishu_sync_error'", [])?;
-        }
-        Ok(())
-    }
-
-    pub fn get_feishu_source_entry(
-        &self,
-        source_key: &str,
-    ) -> AppResult<Option<FeishuSourceEntry>> {
-        let connection = self.connection.lock().expect("database lock poisoned");
-        connection
-            .query_row(
-                "SELECT row_hash, plan_id FROM feishu_source_rows WHERE source_key = ?1",
-                [source_key],
-                |row| {
-                    Ok(FeishuSourceEntry {
-                        row_hash: row.get(0)?,
-                        plan_id: row.get(1)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(AppError::from)
-    }
-
-    pub fn save_feishu_source_entry(
-        &self,
-        source_key: &str,
-        row_hash: &str,
-        plan_id: Option<&str>,
-    ) -> AppResult<()> {
-        let connection = self.connection.lock().expect("database lock poisoned");
-        connection.execute(
-            "INSERT INTO feishu_source_rows (source_key, row_hash, plan_id, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(source_key) DO UPDATE SET
-                row_hash = excluded.row_hash,
-                plan_id = COALESCE(excluded.plan_id, feishu_source_rows.plan_id),
-                last_seen_at = excluded.last_seen_at",
-            params![source_key, row_hash, plan_id, Utc::now().timestamp_millis()],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_feishu_source_plan(
-        &self,
-        plan_id: &str,
-        proposal: &PlanProposal,
-        scheduled_at: Option<i64>,
-        source_title: &str,
-    ) -> AppResult<PlanItem> {
-        validate_plan_proposal(proposal, scheduled_at)?;
-        let connection = self.connection.lock().expect("database lock poisoned");
-        let next_status = if scheduled_at.is_some() {
-            "scheduled"
-        } else {
-            "needs_clarification"
-        };
-        let changed = connection.execute(
-            "UPDATE plans SET
-                title = ?2, details = ?3, content = ?4, link_url = ?5, notes = ?6,
-                scheduled_at = ?7,
-                status = CASE WHEN status = 'done' THEN 'done' ELSE ?8 END,
-                clarification_question = ?9, source_title = ?10,
-                updated_at = ?11, reminded_at = NULL
-             WHERE id = ?1",
-            params![
-                plan_id,
-                proposal.title.trim(),
-                proposal.details.trim(),
-                proposal.content.trim(),
-                proposal.link_url.as_deref().map(str::trim),
-                proposal.notes.as_deref().map(str::trim),
-                scheduled_at,
-                next_status,
-                proposal.clarification_question.as_deref(),
-                truncate(source_title, 500),
-                Utc::now().timestamp_millis(),
-            ],
-        )?;
-        if changed == 0 {
-            return Err(AppError::NotFound("来源计划不存在".to_string()));
-        }
-        self.get_plan_locked(&connection, plan_id)
-    }
-
-    pub fn complete_feishu_source_plan(&self, plan_id: &str) -> AppResult<()> {
-        let connection = self.connection.lock().expect("database lock poisoned");
-        connection.execute(
-            "UPDATE plans SET status = 'done', updated_at = ?2
-             WHERE id = ?1 AND status != 'done'",
-            params![plan_id, Utc::now().timestamp_millis()],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_feishu_source_state(&self) -> AppResult<Option<FeishuSourceState>> {
-        let connection = self.connection.lock().expect("database lock poisoned");
-        let value: Option<String> = connection
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'feishu_source_state'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        value
-            .map(|value| serde_json::from_str(&value).map_err(AppError::from))
-            .transpose()
-    }
-
-    pub fn save_feishu_source_state(&self, state: &FeishuSourceState) -> AppResult<()> {
-        let connection = self.connection.lock().expect("database lock poisoned");
-        connection.execute(
-            "INSERT INTO settings (key, value) VALUES ('feishu_source_state', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [serde_json::to_string(state)?],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_feishu_source_error(&self) -> AppResult<Option<String>> {
-        let connection = self.connection.lock().expect("database lock poisoned");
-        connection
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'feishu_source_error'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(AppError::from)
-    }
-
-    pub fn save_feishu_source_error(&self, error: Option<&str>) -> AppResult<()> {
-        let connection = self.connection.lock().expect("database lock poisoned");
-        if let Some(error) = error {
-            connection.execute(
-                "INSERT INTO settings (key, value) VALUES ('feishu_source_error', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [error],
-            )?;
-        } else {
-            connection.execute("DELETE FROM settings WHERE key = 'feishu_source_error'", [])?;
         }
         Ok(())
     }
@@ -2121,33 +1906,6 @@ mod tests {
         assert!(validate_feishu_source_url("https://team.feishu.cn/sheets/abc123").is_ok());
         assert!(validate_feishu_source_url("https://example.com/sheets/abc123").is_err());
         assert!(validate_feishu_source_url("https://team.feishu.cn/docx/abc123").is_err());
-    }
-
-    #[test]
-    fn feishu_source_can_promote_a_tracked_row_to_a_plan() {
-        let database = Database::in_memory().unwrap();
-        database
-            .save_feishu_source_entry("source-key", "passive-hash", None)
-            .unwrap();
-
-        let plan = database
-            .create_feishu_source_plan(
-                "source-key",
-                "action-hash",
-                "状态：待投递\n公司：示例公司",
-                &plan_proposal(true),
-                None,
-                "飞书投递记录·第 2 行",
-            )
-            .unwrap();
-        let entry = database
-            .get_feishu_source_entry("source-key")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(entry.row_hash, "action-hash");
-        assert_eq!(entry.plan_id.as_deref(), Some(plan.id.as_str()));
-        assert_eq!(database.list_plans(false).unwrap().len(), 1);
     }
 
     #[test]
