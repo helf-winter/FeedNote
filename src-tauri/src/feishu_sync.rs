@@ -75,8 +75,18 @@ pub fn start_scheduler(
                 Ok(settings) => settings,
                 Err(_) => continue,
             };
-            if settings.feishu_sync_enabled {
+            let cleanup_pending = database
+                .list_feishu_plan_cleanup_ids()
+                .is_ok_and(|plan_ids| !plan_ids.is_empty());
+            if settings.feishu_sync_enabled || cleanup_pending {
                 if let Some(_guard) = SyncGuard::acquire(&syncing) {
+                    if let Err(error) = cleanup_legacy_plan_rows(&database, &secrets_path).await {
+                        let _ = database.save_feishu_sync_error(Some(&error.to_string()));
+                        continue;
+                    }
+                    if !settings.feishu_sync_enabled {
+                        continue;
+                    }
                     match sync_pending(&database, &secrets_path).await {
                         Ok(_) => {
                             let _ = database.save_feishu_sync_error(None);
@@ -110,6 +120,7 @@ pub async fn sync_now(
 ) -> AppResult<String> {
     let _guard = SyncGuard::acquire(syncing)
         .ok_or_else(|| AppError::FeishuUnavailable("同步正在进行，请稍后查看状态".to_string()))?;
+    cleanup_legacy_plan_rows(database, secrets_path).await?;
     let synced = match sync_pending(database, secrets_path).await {
         Ok(synced) => {
             database.save_feishu_sync_error(None)?;
@@ -596,6 +607,48 @@ fn source_token(value: &str) -> AppResult<String> {
         .map(|parts| parts[1].to_string())
         .filter(|token| !token.is_empty())
         .ok_or_else(|| AppError::Validation("飞书来源链接缺少表格 token".to_string()))
+}
+
+async fn cleanup_legacy_plan_rows(database: &Database, secrets_path: &Path) -> AppResult<usize> {
+    let plan_ids = database.list_feishu_plan_cleanup_ids()?;
+    if plan_ids.is_empty() {
+        return Ok(0);
+    }
+    let Some(state) = database.get_feishu_sheet_state()? else {
+        database.complete_feishu_plan_cleanup(&plan_ids)?;
+        return Ok(plan_ids.len());
+    };
+
+    let secrets = FeishuSecrets::load(secrets_path)?;
+    let client = client()?;
+    let token = tenant_access_token(&client, &secrets).await?;
+    let rows = read_plan_rows(&client, &token, &state).await?;
+    for plan_id in &plan_ids {
+        let Some(row_index) = rows.get(plan_id) else {
+            continue;
+        };
+        write_values(
+            &client,
+            &token,
+            &state,
+            &format!("A{row_index}:I{row_index}"),
+            vec![vec![json!(""); HEADERS.len()]],
+        )
+        .await?;
+    }
+
+    let remaining_rows = read_plan_rows(&client, &token, &state).await?;
+    let remaining = plan_ids
+        .iter()
+        .filter(|plan_id| remaining_rows.contains_key(plan_id.as_str()))
+        .count();
+    if remaining > 0 {
+        return Err(AppError::FeishuUnavailable(format!(
+            "飞书计划表仍有 {remaining} 条旧投递计划未清除，将自动重试"
+        )));
+    }
+    database.complete_feishu_plan_cleanup(&plan_ids)?;
+    Ok(plan_ids.len())
 }
 
 async fn sync_pending(database: &Database, secrets_path: &Path) -> AppResult<usize> {

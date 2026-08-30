@@ -163,6 +163,10 @@ impl Database {
                 last_seen_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS feishu_plan_cleanup_queue (
+                plan_id TEXT PRIMARY KEY
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                 version_id UNINDEXED,
                 memory_id UNINDEXED,
@@ -176,6 +180,13 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_versions_memory ON memory_versions(memory_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_review_status ON review_items(status, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_plans_status_time ON plans(status, scheduled_at, created_at DESC);
+
+            INSERT OR IGNORE INTO feishu_plan_cleanup_queue (plan_id)
+            SELECT plan_id FROM feishu_source_rows WHERE plan_id IS NOT NULL;
+            DELETE FROM plans
+            WHERE id IN (SELECT plan_id FROM feishu_source_rows WHERE plan_id IS NOT NULL);
+            DELETE FROM feishu_source_rows;
+            DELETE FROM settings WHERE key = 'feishu_source_state';
             "#,
         )?;
         ensure_plan_columns(&connection)?;
@@ -491,6 +502,30 @@ impl Database {
             "SELECT COUNT(*) FROM plans
              WHERE feishu_synced_at IS NULL OR feishu_synced_at < updated_at",
         )
+    }
+
+    pub fn list_feishu_plan_cleanup_ids(&self) -> AppResult<Vec<String>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut statement = connection
+            .prepare("SELECT plan_id FROM feishu_plan_cleanup_queue ORDER BY plan_id LIMIT 500")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn complete_feishu_plan_cleanup(&self, plan_ids: &[String]) -> AppResult<()> {
+        if plan_ids.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.connection.lock().expect("database lock poisoned");
+        let transaction = connection.transaction()?;
+        for plan_id in plan_ids {
+            transaction.execute(
+                "DELETE FROM feishu_plan_cleanup_queue WHERE plan_id = ?1",
+                [plan_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn mark_plan_feishu_synced(&self, plan_id: &str, synced_at: i64) -> AppResult<()> {
@@ -1743,6 +1778,45 @@ mod tests {
         ] {
             assert!(columns.iter().any(|column| column == expected));
         }
+    }
+
+    #[test]
+    fn migration_removes_legacy_source_plans_and_queues_remote_cleanup() {
+        let database = Database::in_memory().unwrap();
+        {
+            let connection = database.connection.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO feed_events (id, raw_content, source_type, created_at)
+                     VALUES ('legacy-feed', '旧投递记录', 'feishu_source', 1)",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO plans
+                     (id, feed_event_id, title, details, status, source_title, created_at, updated_at)
+                     VALUES ('legacy-plan', 'legacy-feed', '旧投递计划', '不应展示',
+                             'needs_clarification', '飞书投递记录·第 2 行', 1, 1)",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO feishu_source_rows (source_key, row_hash, plan_id, last_seen_at)
+                     VALUES ('source-row', 'hash', 'legacy-plan', 1)",
+                    [],
+                )
+                .unwrap();
+        }
+
+        database.migrate().unwrap();
+
+        assert!(database.list_plans(true).unwrap().is_empty());
+        assert_eq!(
+            database.list_feishu_plan_cleanup_ids().unwrap(),
+            vec!["legacy-plan"]
+        );
     }
 
     #[test]
