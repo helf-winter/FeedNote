@@ -1,0 +1,6 @@
+[build]
+target-dir = ".tooling/target"
+
+[net]
+retry = 3
+git-fetch-with-cli = true

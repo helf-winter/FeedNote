@@ -1,0 +1,84 @@
+html:has(body[data-surface="capture-dot"]),
+body[data-surface="capture-dot"],
+body[data-surface="capture-dot"] #app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body[data-surface="capture-dot"] *,
+body[data-surface="capture-dot"] *::before,
+body[data-surface="capture-dot"] *::after {
+  box-sizing: border-box;
+}
+
+body[data-surface="capture-dot"] .capture-dot {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  place-items: center;
+  color: white;
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  outline: 0;
+  cursor: pointer;
+}
+
+body[data-surface="capture-dot"] .capture-dot__core {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  color: white;
+  background: #f04f87;
+  border: 1px solid rgb(255 255 255 / 92%);
+  border-radius: 50%;
+  box-shadow:
+    0 3px 10px rgb(91 22 49 / 32%),
+    0 0 0 1px rgb(240 79 135 / 16%);
+  transition: transform 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+body[data-surface="capture-dot"] .capture-dot:hover .capture-dot__core,
+body[data-surface="capture-dot"] .capture-dot:focus-visible .capture-dot__core {
+  background: #db386f;
+  box-shadow:
+    0 4px 13px rgb(91 22 49 / 38%),
+    0 0 0 3px rgb(240 79 135 / 18%);
+  transform: scale(1.08);
+}
+
+body[data-surface="capture-dot"] .capture-dot:active .capture-dot__core {
+  box-shadow: 0 2px 6px rgb(91 22 49 / 30%);
+  transform: scale(0.94);
+}
+
+body[data-surface="capture-dot"] .capture-dot.busy .capture-dot__core {
+  background: #b93665;
+}
+
+body[data-surface="capture-dot"] .capture-dot__spinner {
+  animation: capture-dot-spin 700ms linear infinite;
+}
+
+@keyframes capture-dot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body[data-surface="capture-dot"] .capture-dot__core {
+    transition: none;
+  }
+
+  body[data-surface="capture-dot"] .capture-dot__spinner {
+    animation-duration: 1.4s;
+  }
+}

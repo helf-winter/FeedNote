@@ -1,0 +1,14 @@
+node_modules/
+dist/
+src-tauri/target/
+.tooling/
+*.db
+*.db-shm
+*.db-wal
+exports/
+data/*
+!data/secrets.env.example
+.cleanup-quarantine/
+FeedNote.exe
+.DS_Store
+Thumbs.db
