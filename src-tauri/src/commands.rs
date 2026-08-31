@@ -156,8 +156,14 @@ pub fn get_feishu_sync_status(state: State<'_, AppState>) -> AppResult<FeishuSyn
 }
 
 #[tauri::command]
-pub async fn sync_feishu_now(state: State<'_, AppState>) -> AppResult<String> {
-    feishu_sync::sync_now(&state.database, &state.secrets_path, &state.feishu_syncing).await
+pub async fn sync_feishu_now(app: AppHandle, state: State<'_, AppState>) -> AppResult<String> {
+    feishu_sync::sync_now(
+        &state.database,
+        &state.secrets_path,
+        &state.feishu_syncing,
+        &app,
+    )
+    .await
 }
 
 #[tauri::command]

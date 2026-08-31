@@ -11,6 +11,7 @@ use std::{
 use chrono::{FixedOffset, TimeZone, Utc};
 use reqwest::{Client, Url};
 use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
 
 use crate::{
     db::Database,
@@ -36,6 +37,7 @@ const HEADERS: [&str; 9] = [
     "来源",
     "更新时间",
 ];
+const TASK_UPDATE_FIELDS: [&str; 5] = ["summary", "description", "start", "due", "completed_at"];
 
 struct FeishuSecrets {
     app_id: String,
@@ -86,6 +88,7 @@ pub fn start_scheduler(
     database: Arc<Database>,
     secrets_path: std::path::PathBuf,
     syncing: Arc<AtomicBool>,
+    app: AppHandle,
 ) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -108,7 +111,7 @@ pub fn start_scheduler(
                         continue;
                     }
                     if settings.feishu_sync_enabled {
-                        match sync_pending(&database, &secrets_path).await {
+                        match sync_pending(&database, &secrets_path, &app).await {
                             Ok(_) => {
                                 let _ = database.save_feishu_sync_error(None);
                             }
@@ -118,7 +121,7 @@ pub fn start_scheduler(
                         }
                     }
                     if settings.feishu_task_reminders_enabled {
-                        match sync_plan_tasks(&database, &secrets_path).await {
+                        match sync_plan_tasks(&database, &secrets_path, &app).await {
                             Ok(_) => {
                                 let _ = database.save_feishu_task_sync_error(None);
                             }
@@ -153,13 +156,14 @@ pub async fn sync_now(
     database: &Database,
     secrets_path: &Path,
     syncing: &AtomicBool,
+    app: &AppHandle,
 ) -> AppResult<String> {
     let _guard = SyncGuard::acquire(syncing)
         .ok_or_else(|| AppError::FeishuUnavailable("同步正在进行，请稍后查看状态".to_string()))?;
     cleanup_legacy_plan_rows(database, secrets_path).await?;
     let settings = database.get_settings()?;
     let synced = if settings.feishu_sync_enabled {
-        match sync_pending(database, secrets_path).await {
+        match sync_pending(database, secrets_path, app).await {
             Ok(synced) => {
                 database.save_feishu_sync_error(None)?;
                 synced
@@ -173,7 +177,7 @@ pub async fn sync_now(
         0
     };
     let task_synced = if settings.feishu_task_reminders_enabled {
-        match sync_plan_tasks(database, secrets_path).await {
+        match sync_plan_tasks(database, secrets_path, app).await {
             Ok(synced) => {
                 database.save_feishu_task_sync_error(None)?;
                 synced
@@ -244,6 +248,12 @@ struct SourceSheet {
     sheet_id: String,
     title: String,
     rows: Vec<SourceRow>,
+}
+
+#[derive(Debug, Clone)]
+struct PlanSheetRow {
+    row_number: usize,
+    completed: Option<bool>,
 }
 
 pub async fn write_application_record(
@@ -673,8 +683,13 @@ struct TaskAssignee {
     id_type: String,
 }
 
-async fn sync_plan_tasks(database: &Database, secrets_path: &Path) -> AppResult<usize> {
-    if database.count_pending_feishu_plan_tasks()? == 0 {
+async fn sync_plan_tasks(
+    database: &Database,
+    secrets_path: &Path,
+    app: &AppHandle,
+) -> AppResult<usize> {
+    let initial_mappings = database.list_feishu_plan_task_mappings()?;
+    if database.count_pending_feishu_plan_tasks()? == 0 && initial_mappings.is_empty() {
         return Ok(0);
     }
     let settings = database.get_settings()?;
@@ -682,6 +697,15 @@ async fn sync_plan_tasks(database: &Database, secrets_path: &Path) -> AppResult<
     let client = client()?;
     let token = tenant_access_token(&client, &secrets).await?;
     let assignee = resolve_task_assignee(&client, &token, &settings, &secrets).await?;
+    let mut synced = pull_plan_task_statuses(
+        database,
+        &client,
+        &token,
+        &assignee.id_type,
+        &initial_mappings,
+        app,
+    )
+    .await?;
     let plans = database.list_plans(true)?;
     let mappings = database.list_feishu_plan_task_mappings()?;
     let plans_by_id: HashMap<&str, &PlanItem> =
@@ -690,8 +714,6 @@ async fn sync_plan_tasks(database: &Database, secrets_path: &Path) -> AppResult<
         .iter()
         .map(|mapping| (mapping.plan_id.as_str(), mapping))
         .collect();
-    let mut synced = 0;
-
     for mapping in &mappings {
         if plans_by_id.contains_key(mapping.plan_id.as_str()) {
             continue;
@@ -739,6 +761,94 @@ async fn sync_plan_tasks(database: &Database, secrets_path: &Path) -> AppResult<
         }
     }
     Ok(synced)
+}
+
+struct RemoteTaskStatus {
+    completed: bool,
+    task_url: Option<String>,
+}
+
+async fn pull_plan_task_statuses(
+    database: &Database,
+    client: &Client,
+    token: &str,
+    user_id_type: &str,
+    mappings: &[FeishuPlanTaskMapping],
+    app: &AppHandle,
+) -> AppResult<usize> {
+    let plans = database.list_plans(true)?;
+    let plans_by_id: HashMap<&str, &PlanItem> =
+        plans.iter().map(|plan| (plan.id.as_str(), plan)).collect();
+    let mut changed = 0;
+    for mapping in mappings {
+        let Some(plan) = plans_by_id.get(mapping.plan_id.as_str()).copied() else {
+            continue;
+        };
+        if plan.updated_at > mapping.plan_updated_at {
+            continue;
+        }
+        let remote = read_task_status(client, token, user_id_type, &mapping.task_guid).await?;
+        let local_completed = plan.status == "done";
+        if remote.completed == local_completed {
+            if mapping.completed != remote.completed || mapping.plan_updated_at < plan.updated_at {
+                database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
+                    plan_id: plan.id.clone(),
+                    task_guid: mapping.task_guid.clone(),
+                    task_url: remote.task_url.or_else(|| mapping.task_url.clone()),
+                    plan_updated_at: plan.updated_at,
+                    completed: remote.completed,
+                })?;
+            }
+            continue;
+        }
+        if let Some(updated) = database.apply_remote_plan_done(
+            &plan.id,
+            remote.completed,
+            plan.updated_at,
+            "feishu_task",
+        )? {
+            database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
+                plan_id: plan.id.clone(),
+                task_guid: mapping.task_guid.clone(),
+                task_url: remote.task_url.or_else(|| mapping.task_url.clone()),
+                plan_updated_at: updated.updated_at,
+                completed: remote.completed,
+            })?;
+            let _ = app.emit("plans-changed", &updated);
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
+async fn read_task_status(
+    client: &Client,
+    token: &str,
+    user_id_type: &str,
+    task_guid: &str,
+) -> AppResult<RemoteTaskStatus> {
+    let response = client
+        .get(format!("{API_BASE}/task/v2/tasks/{task_guid}"))
+        .bearer_auth(token)
+        .query(&[("user_id_type", user_id_type)])
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let task = &payload["data"]["task"];
+    Ok(RemoteTaskStatus {
+        completed: task_completed(task),
+        task_url: task["url"].as_str().map(str::to_string),
+    })
+}
+
+fn task_completed(task: &Value) -> bool {
+    task["completed_at"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<i64>()
+        .is_ok_and(|timestamp| timestamp > 0)
+        || task["status"].as_str() == Some("done")
 }
 
 async fn resolve_task_assignee(
@@ -860,12 +970,9 @@ async fn patch_task(
                 "description": task_description(plan),
                 "start": { "timestamp": timestamp, "is_all_day": false },
                 "due": { "timestamp": timestamp, "is_all_day": false },
-                "reminders": [{ "relative_fire_minute": TASK_REMINDER_MINUTES }],
                 "completed_at": completed_at,
             },
-            "update_fields": [
-                "summary", "description", "start", "due", "reminders", "completed_at"
-            ],
+            "update_fields": TASK_UPDATE_FIELDS,
         }))
         .send()
         .await
@@ -941,14 +1048,14 @@ async fn cleanup_legacy_plan_rows(database: &Database, secrets_path: &Path) -> A
     let token = tenant_access_token(&client, &secrets).await?;
     let rows = read_plan_rows(&client, &token, &state).await?;
     for plan_id in &plan_ids {
-        let Some(row_index) = rows.get(plan_id) else {
+        let Some(row) = rows.get(plan_id) else {
             continue;
         };
         write_values(
             &client,
             &token,
             &state,
-            &format!("A{row_index}:I{row_index}"),
+            &format!("A{}:I{}", row.row_number, row.row_number),
             vec![vec![json!(""); HEADERS.len()]],
         )
         .await?;
@@ -968,10 +1075,14 @@ async fn cleanup_legacy_plan_rows(database: &Database, secrets_path: &Path) -> A
     Ok(plan_ids.len())
 }
 
-async fn sync_pending(database: &Database, secrets_path: &Path) -> AppResult<usize> {
-    let pending = database.list_pending_feishu_plans(200)?;
+async fn sync_pending(
+    database: &Database,
+    secrets_path: &Path,
+    app: &AppHandle,
+) -> AppResult<usize> {
+    let initial_pending = database.list_pending_feishu_plans(200)?;
     let existing_state = database.get_feishu_sheet_state()?;
-    if pending.is_empty() && existing_state.is_some() {
+    if initial_pending.is_empty() && existing_state.is_none() {
         return Ok(0);
     }
 
@@ -983,6 +1094,8 @@ async fn sync_pending(database: &Database, secrets_path: &Path) -> AppResult<usi
         None => create_sheet(database, &client, &token).await?,
     };
     let rows = read_plan_rows(&client, &token, &state).await?;
+    let pulled = pull_plan_sheet_statuses(database, &rows, app)?;
+    let pending = database.list_pending_feishu_plans(200)?;
     if rows.is_empty() {
         write_values(
             &client,
@@ -1014,7 +1127,38 @@ async fn sync_pending(database: &Database, secrets_path: &Path) -> AppResult<usi
     for plan in &pending {
         database.mark_plan_feishu_synced(&plan.id, synced_at)?;
     }
-    Ok(pending.len())
+    Ok(pulled + pending.len())
+}
+
+fn pull_plan_sheet_statuses(
+    database: &Database,
+    rows: &HashMap<String, PlanSheetRow>,
+    app: &AppHandle,
+) -> AppResult<usize> {
+    let plans = database.list_plans(true)?;
+    let mut changed = 0;
+    for plan in &plans {
+        let Some(remote_done) = rows.get(&plan.id).and_then(|row| row.completed) else {
+            continue;
+        };
+        let local_done = plan.status == "done";
+        let local_is_synced = plan
+            .feishu_synced_at
+            .is_some_and(|value| value >= plan.updated_at);
+        if remote_done == local_done || !local_is_synced {
+            continue;
+        }
+        if let Some(updated) = database.apply_remote_plan_done(
+            &plan.id,
+            remote_done,
+            plan.updated_at,
+            "feishu_sheet",
+        )? {
+            let _ = app.emit("plans-changed", &updated);
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 async fn tenant_access_token(client: &Client, secrets: &FeishuSecrets) -> AppResult<String> {
@@ -1084,8 +1228,8 @@ async fn read_plan_rows(
     client: &Client,
     token: &str,
     state: &FeishuSheetState,
-) -> AppResult<HashMap<String, usize>> {
-    let range = format!("{}!A:A", state.sheet_id);
+) -> AppResult<HashMap<String, PlanSheetRow>> {
+    let range = format!("{}!A:B", state.sheet_id);
     let mut url = Url::parse(&format!(
         "{API_BASE}/sheets/v2/spreadsheets/{}/values/",
         state.spreadsheet_token
@@ -1110,11 +1254,19 @@ async fn read_plan_rows(
         .iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            row.as_array()
-                .and_then(|cells| cells.first())
-                .and_then(Value::as_str)
-                .filter(|id| *id != HEADERS[0] && !id.is_empty())
-                .map(|id| (id.to_string(), index + 1))
+            let cells = row.as_array()?;
+            let id = cells
+                .first()
+                .map(cell_text)
+                .filter(|id| id != HEADERS[0] && !id.is_empty())?;
+            let completed = cells.get(1).and_then(remote_done_from_status);
+            Some((
+                id,
+                PlanSheetRow {
+                    row_number: index + 1,
+                    completed,
+                },
+            ))
         })
         .collect())
 }
@@ -1123,16 +1275,16 @@ async fn upsert_plan(
     client: &Client,
     token: &str,
     state: &FeishuSheetState,
-    rows: &HashMap<String, usize>,
+    rows: &HashMap<String, PlanSheetRow>,
     plan: &PlanItem,
 ) -> AppResult<()> {
     let row = plan_row(plan);
-    if let Some(row_index) = rows.get(&plan.id) {
+    if let Some(existing) = rows.get(&plan.id) {
         write_values(
             client,
             token,
             state,
-            &format!("A{row_index}:I{row_index}"),
+            &format!("A{}:I{}", existing.row_number, existing.row_number),
             vec![row],
         )
         .await
@@ -1209,6 +1361,20 @@ fn status_label(status: &str) -> &str {
         "needs_clarification" => "待补充时间",
         "done" => "已完成",
         _ => status,
+    }
+}
+
+fn remote_done_from_status(value: &Value) -> Option<bool> {
+    match cell_text(value).trim().to_ascii_lowercase().as_str() {
+        "已完成" | "完成" | "done" | "completed" => Some(true),
+        "已安排"
+        | "待补充时间"
+        | "未完成"
+        | "待办"
+        | "scheduled"
+        | "needs_clarification"
+        | "todo" => Some(false),
+        _ => None,
     }
 }
 
@@ -1405,5 +1571,29 @@ mod tests {
             source_token("https://team.feishu.cn/sheets/abc123?sheet=one").unwrap(),
             "abc123"
         );
+    }
+
+    #[test]
+    fn parses_only_supported_remote_plan_statuses() {
+        assert_eq!(remote_done_from_status(&json!("已完成")), Some(true));
+        assert_eq!(remote_done_from_status(&json!("todo")), Some(false));
+        assert_eq!(remote_done_from_status(&json!("随便写的状态")), None);
+    }
+
+    #[test]
+    fn parses_feishu_task_completion_fields() {
+        assert!(!task_completed(&json!({
+            "status": "todo",
+            "completed_at": "0"
+        })));
+        assert!(task_completed(&json!({
+            "status": "todo",
+            "completed_at": "1788142920464"
+        })));
+        assert!(task_completed(&json!({
+            "status": "done",
+            "completed_at": "0"
+        })));
+        assert!(!TASK_UPDATE_FIELDS.contains(&"reminders"));
     }
 }

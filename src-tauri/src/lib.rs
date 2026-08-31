@@ -130,6 +130,7 @@ pub fn run() {
                 state.database.clone(),
                 state.secrets_path.clone(),
                 state.feishu_syncing.clone(),
+                app.handle().clone(),
             );
             let open_item = MenuItem::with_id(app, "open", "打开 FeedNote", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;

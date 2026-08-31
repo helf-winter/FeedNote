@@ -733,7 +733,7 @@ function typeLabel(type: string): string {
 
         <div class="settings-section">
           <div class="settings-heading">
-            <div><h2>飞书计划表</h2><p>由许科AI助手将真正的待办维护到独立表格。</p></div>
+            <div><h2>飞书计划表</h2><p>维护真正的待办，并双向同步已有计划的完成状态。</p></div>
             <label class="toggle-control">
               <input v-model="settings.feishuSyncEnabled" type="checkbox" />
               <span aria-hidden="true" />
@@ -761,7 +761,7 @@ function typeLabel(type: string): string {
 
         <div class="settings-section">
           <div class="settings-heading">
-            <div><h2>飞书待办提醒</h2><p>为有明确时间的计划创建个人飞书任务，并在开始前 3 小时提醒。</p></div>
+            <div><h2>飞书待办提醒</h2><p>创建个人飞书任务，双向同步完成状态，并在开始前 3 小时提醒。</p></div>
             <label class="toggle-control">
               <input v-model="settings.feishuTaskRemindersEnabled" type="checkbox" />
               <span aria-hidden="true" />
@@ -801,8 +801,8 @@ function typeLabel(type: string): string {
             <li>密钥只从 data\\secrets.env 读取，不进入数据库、前端或导出文件。</li>
             <li>不监听剪贴板、键盘，也不扫描用户目录。</li>
             <li><Smartphone :size="14" />手机推送默认关闭，只发送计划卡片字段，不发送原文和周边上下文。</li>
-            <li><Cloud :size="14" />两个飞书通道独立开关、独立写入；关闭后不会向对应表格发起写请求。</li>
-            <li><Clock3 :size="14" />飞书待办提醒独立开关，只同步已有计划字段并固定提前 3 小时提醒。</li>
+            <li><Cloud :size="14" />两个飞书通道独立开关；计划表只回读已有计划的完成状态，投递表绝不反向生成计划。</li>
+            <li><Clock3 :size="14" />飞书待办只双向同步已有任务的完成状态，并固定提前 3 小时提醒。</li>
           </ul>
         </div>
       </section>

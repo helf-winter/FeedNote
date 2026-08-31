@@ -450,13 +450,98 @@ impl Database {
         let connection = self.connection.lock().expect("database lock poisoned");
         let status = if done { "done" } else { "scheduled" };
         let changed = connection.execute(
-            "UPDATE plans SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            "UPDATE plans SET status = ?2, updated_at = MAX(?3, updated_at + 1) WHERE id = ?1",
             params![plan_id, status, Utc::now().timestamp_millis()],
         )?;
         if changed == 0 {
             return Err(AppError::NotFound("计划不存在".to_string()));
         }
         self.get_plan_locked(&connection, plan_id)
+    }
+
+    pub fn apply_remote_plan_done(
+        &self,
+        plan_id: &str,
+        done: bool,
+        expected_updated_at: i64,
+        source: &str,
+    ) -> AppResult<Option<PlanItem>> {
+        let sheet_source = match source {
+            "feishu_sheet" => true,
+            "feishu_task" => false,
+            _ => return Err(AppError::Validation("远端计划状态来源不受支持".to_string())),
+        };
+        let mut connection = self.connection.lock().expect("database lock poisoned");
+        let transaction = connection.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT status, scheduled_at, updated_at, feishu_synced_at
+                 FROM plans WHERE id = ?1",
+                [plan_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((current_status, scheduled_at, updated_at, feishu_synced_at)) = current else {
+            return Ok(None);
+        };
+        if updated_at != expected_updated_at
+            || (sheet_source && !feishu_synced_at.is_some_and(|value| value >= updated_at))
+            || (current_status == "done") == done
+        {
+            return Ok(None);
+        }
+
+        let status = if done {
+            "done"
+        } else if scheduled_at.is_some() {
+            "scheduled"
+        } else {
+            "needs_clarification"
+        };
+        let now = Utc::now()
+            .timestamp_millis()
+            .max(expected_updated_at.saturating_add(1));
+        let next_feishu_synced_at = if sheet_source {
+            Some(now)
+        } else {
+            feishu_synced_at
+        };
+        let changed = transaction.execute(
+            "UPDATE plans
+             SET status = ?2, updated_at = ?3, feishu_synced_at = ?4
+             WHERE id = ?1 AND updated_at = ?5",
+            params![
+                plan_id,
+                status,
+                now,
+                next_feishu_synced_at,
+                expected_updated_at
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        transaction.execute(
+            "INSERT INTO audit_log
+             (id, actor_type, action, target_type, target_id, metadata_json, created_at)
+             VALUES (?1, 'external', 'plan.status_synced_from_feishu', 'plan', ?2, ?3, ?4)",
+            params![
+                Uuid::new_v4().to_string(),
+                plan_id,
+                json!({ "source": source, "done": done }).to_string(),
+                now
+            ],
+        )?;
+        let plan = self.get_plan_locked(&transaction, plan_id)?;
+        transaction.commit()?;
+        Ok(Some(plan))
     }
 
     pub fn list_due_plan_reminders(&self, now: i64, due_at: i64) -> AppResult<Vec<PlanItem>> {
@@ -1890,6 +1975,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(database.count_pending_feishu_plan_tasks().unwrap(), 0);
+    }
+
+    #[test]
+    fn remote_completion_respects_local_changes_and_sheet_sync_state() {
+        let database = Database::in_memory().unwrap();
+        let feed = database
+            .create_selection_feed("明天验收", "明天上午九点验收", "测试")
+            .unwrap();
+        let plan = database
+            .create_plan(
+                &feed.feed_id,
+                &plan_proposal(false),
+                Some(1_788_134_400_000),
+                "测试",
+            )
+            .unwrap();
+
+        assert!(database
+            .apply_remote_plan_done(&plan.id, true, plan.updated_at, "feishu_sheet")
+            .unwrap()
+            .is_none());
+        database
+            .mark_plan_feishu_synced(&plan.id, plan.updated_at)
+            .unwrap();
+        let sheet_done = database
+            .apply_remote_plan_done(&plan.id, true, plan.updated_at, "feishu_sheet")
+            .unwrap()
+            .unwrap();
+        assert_eq!(sheet_done.status, "done");
+        assert_eq!(sheet_done.feishu_synced_at, Some(sheet_done.updated_at));
+
+        let local_reopened = database.set_plan_done(&plan.id, false).unwrap();
+        assert!(database
+            .apply_remote_plan_done(&plan.id, true, local_reopened.updated_at, "feishu_sheet")
+            .unwrap()
+            .is_none());
+        let task_done = database
+            .apply_remote_plan_done(&plan.id, true, local_reopened.updated_at, "feishu_task")
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_done.status, "done");
+        assert!(task_done
+            .feishu_synced_at
+            .is_some_and(|value| value < task_done.updated_at));
+        assert_eq!(database.list_pending_feishu_plans(20).unwrap().len(), 1);
     }
 
     #[test]
