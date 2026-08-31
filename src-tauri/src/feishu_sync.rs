@@ -365,10 +365,9 @@ impl Drop for SyncGuard<'_> {
 #[derive(Debug)]
 struct SourceRow {
     row_number: usize,
+    status: String,
     company: String,
-    role: String,
     link: Option<String>,
-    notes: Option<String>,
 }
 
 #[derive(Debug)]
@@ -420,13 +419,12 @@ pub async fn write_application_record(
         spreadsheet_url: settings.feishu_source_url,
     };
     let (action, expected_row) = if let Some(row) = existing {
-        let values = merged_application_row(row, proposal);
         write_values(
             &client,
             &token,
             &state,
-            &format!("A{}:E{}", row.row_number, row.row_number),
-            vec![values],
+            &format!("A{}:A{}", row.row_number, row.row_number),
+            vec![application_status_cell(proposal)],
         )
         .await?;
         ("updated", row.row_number)
@@ -455,7 +453,11 @@ pub async fn write_application_record(
     .await?;
     let verified_row = verified_rows
         .iter()
-        .find(|row| application_row_matches(row, proposal))
+        .find(|row| {
+            row.row_number == expected_row
+                && application_row_matches(row, proposal)
+                && row.status == proposal.status.trim()
+        })
         .ok_or_else(|| {
             AppError::FeishuUnavailable("投递记录写入后回读校验失败，请重试".to_string())
         })?;
@@ -573,44 +575,45 @@ async fn read_source_rows(
             .position(|cell| cell_text(cell).trim() == name)
             .ok_or_else(|| AppError::FeishuUnavailable(format!("来源表缺少‘{name}’列")))
     };
-    column("状态")?;
+    let status_col = column("状态")?;
     let company_col = column("公司/事项")?;
-    let role_col = column("岗位/方向")?;
+    column("岗位/方向")?;
     let link_col = column("链接")?;
-    let notes_col = column("备注")?;
+    column("备注")?;
     let mut rows = Vec::new();
     for (index, value) in values.iter().enumerate().skip(1) {
         let Some(cells) = value.as_array() else {
             continue;
         };
         let get = |column: usize| cells.get(column).map(cell_text).unwrap_or_default();
+        let status = get(status_col).trim().to_string();
         let company = get(company_col).trim().to_string();
         if company.is_empty() {
             continue;
         }
-        let role = get(role_col).trim().to_string();
         let link = nonempty(get(link_col));
-        let notes = nonempty(get(notes_col));
         rows.push(SourceRow {
             row_number: index + 1,
+            status,
             company,
-            role,
             link,
-            notes,
         });
     }
     Ok(rows)
 }
 
 fn validate_application_record(proposal: &ApplicationRecordProposal) -> AppResult<()> {
-    const STATUSES: [&str; 7] = [
+    const STATUSES: [&str; 10] = [
         "待投递",
         "简历筛选",
-        "笔试",
-        "面试",
+        "待笔试",
+        "待AI面",
+        "待一面",
+        "待二面",
+        "待三面",
+        "待HR面",
+        "已挂",
         "Offer",
-        "已结束",
-        "待确认",
     ];
     if !STATUSES.contains(&proposal.status.trim()) {
         return Err(AppError::AiInvalid("投递状态不在允许范围内".to_string()));
@@ -644,23 +647,54 @@ fn validate_application_record(proposal: &ApplicationRecordProposal) -> AppResul
 }
 
 fn application_row_matches(row: &SourceRow, proposal: &ApplicationRecordProposal) -> bool {
+    if company_matches(&row.company, &proposal.company) {
+        return true;
+    }
     let proposed_link = proposal
         .link_url
         .as_deref()
         .map(normalize_value)
         .filter(|value| !value.is_empty());
-    if proposed_link.is_some()
+    proposed_link.is_some()
         && row.link.as_deref().map(normalize_value).as_ref() == proposed_link.as_ref()
-    {
+}
+
+fn company_matches(existing: &str, incoming: &str) -> bool {
+    let existing = normalize_company(existing);
+    let incoming = normalize_company(incoming);
+    if existing == incoming {
         return true;
     }
-    let same_company = normalize_value(&row.company) == normalize_value(&proposal.company);
-    let proposed_role = proposal
-        .role
-        .as_deref()
-        .map(normalize_value)
-        .unwrap_or_default();
-    same_company && !proposed_role.is_empty() && normalize_value(&row.role) == proposed_role
+    company_alias(&existing, &incoming) || company_alias(&incoming, &existing)
+}
+
+fn company_alias(shorter: &str, longer: &str) -> bool {
+    if shorter.chars().count() < 4 {
+        return false;
+    }
+    let Some(remainder) = longer.strip_prefix(shorter) else {
+        return false;
+    };
+    matches!(
+        remainder,
+        "科技" | "集团" | "科技集团" | "网络" | "信息技术"
+    )
+}
+
+fn normalize_company(value: &str) -> String {
+    let mut value: String = value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect();
+    for suffix in ["股份有限公司", "有限责任公司", "有限公司", "公司"] {
+        if let Some(stripped) = value.strip_suffix(suffix) {
+            value = stripped.to_string();
+            break;
+        }
+    }
+    value
 }
 
 fn normalize_value(value: &str) -> String {
@@ -700,47 +734,8 @@ fn application_row(proposal: &ApplicationRecordProposal) -> Vec<Value> {
     .collect()
 }
 
-fn merged_application_row(
-    existing: &SourceRow,
-    proposal: &ApplicationRecordProposal,
-) -> Vec<Value> {
-    let role = proposal
-        .role
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&existing.role);
-    let link = proposal
-        .link_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or(existing.link.as_deref())
-        .unwrap_or_default();
-    let notes = merge_notes(existing.notes.as_deref(), proposal.notes.as_deref());
-    [
-        proposal.status.trim(),
-        proposal.company.trim(),
-        role,
-        link,
-        notes.as_deref().unwrap_or_default(),
-    ]
-    .into_iter()
-    .map(|value| json!(safe_cell(value)))
-    .collect()
-}
-
-fn merge_notes(existing: Option<&str>, incoming: Option<&str>) -> Option<String> {
-    let existing = existing.map(str::trim).filter(|value| !value.is_empty());
-    let incoming = incoming.map(str::trim).filter(|value| !value.is_empty());
-    match (existing, incoming) {
-        (Some(left), Some(right)) if left != right && !left.contains(right) => {
-            Some(format!("{left}；{right}"))
-        }
-        (Some(left), _) => Some(left.to_string()),
-        (None, Some(right)) => Some(right.to_string()),
-        (None, None) => None,
-    }
+fn application_status_cell(proposal: &ApplicationRecordProposal) -> Vec<Value> {
+    vec![json!(safe_cell(proposal.status.trim()))]
 }
 
 async fn append_application_values(
@@ -2007,13 +2002,12 @@ fn network_error(error: reqwest::Error) -> AppError {
 mod tests {
     use super::*;
 
-    fn source_row(notes: Option<&str>) -> SourceRow {
+    fn source_row() -> SourceRow {
         SourceRow {
             row_number: 2,
+            status: "简历筛选".to_string(),
             company: "示例公司".to_string(),
-            role: "前端工程师".to_string(),
             link: Some("https://example.com/apply".to_string()),
-            notes: notes.map(str::to_string),
         }
     }
 
@@ -2084,8 +2078,8 @@ mod tests {
     }
 
     #[test]
-    fn application_rows_match_by_link_or_company_and_role() {
-        let row = source_row(None);
+    fn application_rows_match_by_company_or_exact_link() {
+        let row = source_row();
         assert!(application_row_matches(
             &row,
             &application(
@@ -2096,24 +2090,18 @@ mod tests {
         ));
         assert!(application_row_matches(
             &row,
-            &application("示例公司", Some("前端工程师"), None)
+            &application("示例公司", Some("完全不同的岗位"), None)
         ));
-        assert!(!application_row_matches(
+        assert!(application_row_matches(
             &row,
             &application("示例公司", None, None)
         ));
-    }
-
-    #[test]
-    fn merging_application_notes_preserves_existing_context() {
-        assert_eq!(
-            merge_notes(Some("官网投递"), Some("内推码 123")),
-            Some("官网投递；内推码 123".to_string())
-        );
-        assert_eq!(
-            merge_notes(Some("官网投递"), Some("官网投递")),
-            Some("官网投递".to_string())
-        );
+        assert!(company_matches("烽火通信科技股份有限公司", "烽火通信"));
+        assert!(!company_matches("中国移动研究院", "中国移动"));
+        assert!(!application_row_matches(
+            &row,
+            &application("另一家公司", None, None)
+        ));
     }
 
     #[test]
@@ -2126,6 +2114,17 @@ mod tests {
         invalid.company = "示例公司".to_string();
         invalid.status = "自动创建计划".to_string();
         assert!(validate_application_record(&invalid).is_err());
+        invalid.status = "面试".to_string();
+        assert!(validate_application_record(&invalid).is_err());
+    }
+
+    #[test]
+    fn existing_application_updates_only_the_status_cell() {
+        let mut proposal = application("示例公司", Some("后端工程师"), None);
+        proposal.status = "待二面".to_string();
+        proposal.notes = Some("不应覆盖旧备注".to_string());
+        assert_eq!(application_status_cell(&proposal), vec![json!("待二面")]);
+        assert_eq!(application_row(&proposal).len(), 5);
     }
 
     #[test]

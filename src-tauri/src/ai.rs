@@ -145,8 +145,9 @@ pub async fn route_capture(
             招聘网页、职位介绍、公司名单、投递状态本身不是计划；页面发布日期也不是计划时间。\n\
             createPlan=true 时必须提供 plan。只有完整日期和具体时间都明确才能填写 scheduledFor；缺任一项就 needsClarification=true 并询问用户。\n\
          2. writeApplicationRecord：只有文本处于求职招聘语境，并且能识别具体公司/事项时才为 true。\n\
-            applicationRecord.status 只使用：待投递、简历筛选、笔试、面试、Offer、已结束、待确认。\n\
-            仅看到职位页面且没有已投递证据时用待投递；已投递但未有后续结果时用简历筛选。\n\
+            applicationRecord.status 只使用：待投递、简历筛选、待笔试、待AI面、待一面、待二面、待三面、待HR面、已挂、Offer。\n\
+            仅看到职位页面且没有已投递证据时用待投递；已投递但未有后续结果时用简历筛选；笔试邀请用待笔试；\n\
+            AI 面用待AI面；明确一面/二面/三面分别使用对应状态；HR 面用待HR面；未说明轮次的普通面试用待一面；明确淘汰或拒绝用已挂。\n\
             公司无法识别时必须为 false。普通公司新闻、技术文章和商务事项不得写入投递表。\n\
          例如：职位详情页通常只写投递记录；‘明天下午三点某公司 AI 面’应同时写投递记录和创建计划；普通知识只进入记忆。\n\n\
          只返回一个 JSON 对象：\n\
@@ -178,6 +179,9 @@ fn parse_capture_routing_response(
     if let Some(plan) = proposal.plan.as_mut() {
         normalize_plan_content(plan);
     }
+    if let Some(record) = proposal.application_record.as_mut() {
+        record.status = normalize_application_status(&record.status).to_string();
+    }
     for (name, confidence) in [
         ("计划", proposal.plan_confidence),
         ("投递记录", proposal.application_confidence),
@@ -205,6 +209,20 @@ fn parse_capture_routing_response(
         }
     }
     Ok(proposal)
+}
+
+fn normalize_application_status(status: &str) -> &str {
+    match status.trim() {
+        "笔试" => "待笔试",
+        "AI面" | "AI 面" | "AI面试" => "待AI面",
+        "面试" | "一面" | "初面" => "待一面",
+        "二面" | "复试" => "待二面",
+        "三面" | "终面" => "待三面",
+        "HR面" | "HR 面" | "HR面试" => "待HR面",
+        "已结束" | "拒绝" | "淘汰" => "已挂",
+        "待确认" => "简历筛选",
+        value => value,
+    }
 }
 
 pub async fn resolve_plan_time(
@@ -605,7 +623,7 @@ mod tests {
             content: vec![AnthropicContent {
                 kind: "text".to_string(),
                 text: Some(
-                    r#"{"createPlan":true,"planConfidence":0.97,"writeApplicationRecord":true,"applicationConfidence":0.98,"reason":"明确面试邀请","plan":{"title":"示例科技前端面试","details":"参加示例科技前端面试","content":"面试","linkUrl":"https://example.com/meeting","notes":null,"scheduledFor":"2026-09-01T15:00:00+08:00","timeEvidence":"9月1日下午3点","needsClarification":false,"clarificationQuestion":null},"applicationRecord":{"status":"面试","company":"示例科技","role":"前端工程师","linkUrl":"https://example.com/meeting","notes":null}}"#
+                    r#"{"createPlan":true,"planConfidence":0.97,"writeApplicationRecord":true,"applicationConfidence":0.98,"reason":"明确面试邀请","plan":{"title":"示例科技前端面试","details":"参加示例科技前端面试","content":"面试","linkUrl":"https://example.com/meeting","notes":null,"scheduledFor":"2026-09-01T15:00:00+08:00","timeEvidence":"9月1日下午3点","needsClarification":false,"clarificationQuestion":null},"applicationRecord":{"status":"待AI面","company":"示例科技","role":"前端工程师","linkUrl":"https://example.com/meeting","notes":null}}"#
                         .to_string(),
                 ),
             }],
@@ -613,7 +631,20 @@ mod tests {
         let proposal = parse_capture_routing_response(response).unwrap();
         assert!(proposal.create_plan);
         assert!(proposal.write_application_record);
+        assert_eq!(
+            proposal.application_record.as_ref().unwrap().status,
+            "待AI面"
+        );
         assert_eq!(proposal.plan.unwrap().content, "面试");
+    }
+
+    #[test]
+    fn normalizes_legacy_application_statuses_to_sheet_options() {
+        assert_eq!(normalize_application_status("笔试"), "待笔试");
+        assert_eq!(normalize_application_status("面试"), "待一面");
+        assert_eq!(normalize_application_status("HR面试"), "待HR面");
+        assert_eq!(normalize_application_status("已结束"), "已挂");
+        assert_eq!(normalize_application_status("Offer"), "Offer");
     }
 
     #[test]
