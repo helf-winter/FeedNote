@@ -21,6 +21,7 @@ import {
   LockKeyhole,
   Menu,
   NotebookPen,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -63,6 +64,7 @@ import {
   syncFeishuSourceNow,
   testMobilePush,
   updateSettings,
+  updateSecretItem,
   unlockVault,
   type AppSettings,
   type FeedEvent,
@@ -77,6 +79,16 @@ import {
   type SecretItem,
   type VaultStatus,
 } from "./api";
+
+interface SecretEditorForm {
+  id: string;
+  title: string;
+  secretType: string;
+  account: string;
+  secretValue: string;
+  website: string;
+  notes: string;
+}
 
 const activePage = ref<Page>("inbox");
 const sidebarOpen = ref(false);
@@ -150,6 +162,12 @@ const vaultPassword = ref("");
 const vaultPasswordConfirm = ref("");
 const vaultBusy = ref(false);
 const revealedSecrets = ref(new Set<string>());
+const secretEditor = ref<SecretEditorForm>();
+const secretEditBusy = ref(false);
+const secretDeleteTarget = ref<SecretItem>();
+const secretDeletePassword = ref("");
+const secretDeleteError = ref("");
+const secretDeleteBusy = ref(false);
 const filteredSecrets = computed(() => {
   const query = secretSearch.value.trim().toLowerCase();
   if (!query) return secretItems.value;
@@ -217,6 +235,8 @@ onMounted(async () => {
     if (event.key === "Escape") {
       selectedMemory.value = undefined;
       deleteTarget.value = undefined;
+      closeSecretEditor();
+      closeSecretDelete();
       sidebarOpen.value = false;
     }
   });
@@ -467,6 +487,8 @@ async function exportData(): Promise<void> {
 }
 
 function navigate(page: Page): void {
+  closeSecretEditor();
+  closeSecretDelete();
   activePage.value = page;
   sidebarOpen.value = false;
   if (page === "inbox") nextTick(() => composerElement.value?.focus());
@@ -522,6 +544,8 @@ async function authenticateSecretVault(initializing = false): Promise<void> {
 }
 
 async function lockSecretVault(): Promise<void> {
+  closeSecretEditor();
+  closeSecretDelete();
   vaultStatus.value = await lockVault();
   secretItems.value = [];
   revealedSecrets.value = new Set();
@@ -543,14 +567,80 @@ async function copySecretValue(secret: SecretItem): Promise<void> {
   }
 }
 
-async function removeSecret(secret: SecretItem): Promise<void> {
-  if (!window.confirm(`永久删除“${secret.title}”？`)) return;
+function openSecretEditor(secret: SecretItem): void {
+  closeSecretDelete();
+  secretEditor.value = {
+    id: secret.id,
+    title: secret.title,
+    secretType: secret.secretType,
+    account: secret.account ?? "",
+    secretValue: secret.secretValue,
+    website: secret.website ?? "",
+    notes: secret.notes ?? "",
+  };
+}
+
+function closeSecretEditor(): void {
+  secretEditor.value = undefined;
+  secretEditBusy.value = false;
+}
+
+async function saveSecretEdit(): Promise<void> {
+  const editor = secretEditor.value;
+  if (!editor || secretEditBusy.value) return;
+  if (!editor.title.trim() || !editor.secretType.trim() || !editor.secretValue.trim()) {
+    notify("名称、类型和秘密值不能为空", "error");
+    return;
+  }
+  secretEditBusy.value = true;
   try {
-    await deleteSecretItem(secret.id);
+    await updateSecretItem(editor.id, {
+      title: editor.title,
+      secretType: editor.secretType,
+      account: editor.account,
+      secretValue: editor.secretValue,
+      website: editor.website,
+      notes: editor.notes,
+    });
+    closeSecretEditor();
+    await refreshSecretVault();
+    notify("秘密记录已更新", "success");
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  } finally {
+    secretEditBusy.value = false;
+  }
+}
+
+function requestSecretDelete(secret: SecretItem): void {
+  closeSecretEditor();
+  secretDeleteTarget.value = secret;
+  secretDeletePassword.value = "";
+  secretDeleteError.value = "";
+}
+
+function closeSecretDelete(): void {
+  secretDeleteTarget.value = undefined;
+  secretDeletePassword.value = "";
+  secretDeleteError.value = "";
+  secretDeleteBusy.value = false;
+}
+
+async function confirmSecretDelete(): Promise<void> {
+  const target = secretDeleteTarget.value;
+  if (!target || secretDeleteBusy.value || secretDeletePassword.value.length < 6) return;
+  secretDeleteBusy.value = true;
+  secretDeleteError.value = "";
+  try {
+    await deleteSecretItem(target.id, secretDeletePassword.value);
+    closeSecretDelete();
     await refreshSecretVault();
     notify("秘密记录已删除", "success");
   } catch (error) {
-    notify(errorMessage(error), "error");
+    secretDeleteError.value = errorMessage(error);
+    secretDeletePassword.value = "";
+  } finally {
+    secretDeleteBusy.value = false;
   }
 }
 
@@ -800,8 +890,8 @@ function typeLabel(type: string): string {
         <form v-else-if="!vaultStatus.unlocked" class="vault-gate" @submit.prevent="authenticateSecretVault(false)">
           <span class="vault-gate-icon"><LockKeyhole :size="24" /></span>
           <h2>秘密备忘录已锁定</h2>
-          <input v-model="vaultPassword" type="password" maxlength="256" autocomplete="current-password" autofocus placeholder="输入主密码" />
-          <button class="primary-button" type="submit" :disabled="vaultBusy || !vaultPassword">
+          <input v-model="vaultPassword" type="password" minlength="6" maxlength="256" autocomplete="current-password" autofocus placeholder="输入主密码" />
+          <button class="primary-button" type="submit" :disabled="vaultBusy || vaultPassword.length < 6">
             <LoaderCircle v-if="vaultBusy" class="spin" :size="16" />
             <UnlockKeyhole v-else :size="16" />解锁
           </button>
@@ -829,12 +919,13 @@ function typeLabel(type: string): string {
                   <h2>{{ secret.title }}</h2>
                 </div>
                 <div class="secret-actions">
+                  <button class="icon-button" type="button" title="编辑" aria-label="编辑秘密" @click="openSecretEditor(secret)"><Pencil :size="16" /></button>
                   <button class="icon-button" type="button" :title="revealedSecrets.has(secret.id) ? '隐藏' : '显示'" :aria-label="revealedSecrets.has(secret.id) ? '隐藏秘密' : '显示秘密'" @click="toggleSecretReveal(secret.id)">
                     <EyeOff v-if="revealedSecrets.has(secret.id)" :size="17" />
                     <Eye v-else :size="17" />
                   </button>
                   <button class="icon-button" type="button" title="复制" aria-label="复制秘密" @click="copySecretValue(secret)"><Copy :size="16" /></button>
-                  <button class="icon-button danger" type="button" title="删除" aria-label="删除秘密" @click="removeSecret(secret)"><Trash2 :size="16" /></button>
+                  <button class="icon-button danger" type="button" title="删除" aria-label="删除秘密" @click="requestSecretDelete(secret)"><Trash2 :size="16" /></button>
                 </div>
               </div>
               <code class="secret-value" :class="{ revealed: revealedSecrets.has(secret.id) }">{{ revealedSecrets.has(secret.id) ? secret.secretValue : '••••••••••••••••' }}</code>
@@ -1108,6 +1199,57 @@ function typeLabel(type: string): string {
             </section>
           </div>
         </aside>
+      </div>
+    </Transition>
+
+    <Transition name="modal">
+      <div v-if="secretEditor" class="modal-layer">
+        <button class="modal-scrim" aria-label="取消编辑" @click="closeSecretEditor" />
+        <form class="secret-dialog secret-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="secret-edit-title" @submit.prevent="saveSecretEdit">
+          <header>
+            <div><span class="secret-type">秘密备忘录</span><h2 id="secret-edit-title">编辑秘密</h2></div>
+            <button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="closeSecretEditor"><X :size="18" /></button>
+          </header>
+          <div class="secret-edit-grid">
+            <label><span>名称</span><input v-model="secretEditor.title" maxlength="120" required autofocus /></label>
+            <label><span>类型</span><input v-model="secretEditor.secretType" list="secret-type-options" maxlength="40" required /></label>
+            <datalist id="secret-type-options"><option value="密码" /><option value="API Key" /><option value="私钥" /><option value="恢复码" /><option value="令牌" /><option value="其他" /></datalist>
+            <label class="wide-field"><span>秘密值</span><textarea v-model="secretEditor.secretValue" rows="3" maxlength="100000" required /></label>
+            <label><span>账号</span><input v-model="secretEditor.account" maxlength="300" /></label>
+            <label><span>网站</span><input v-model="secretEditor.website" type="url" maxlength="2000" placeholder="https://" /></label>
+            <label class="wide-field"><span>备注</span><textarea v-model="secretEditor.notes" rows="3" maxlength="1000" /></label>
+          </div>
+          <div class="dialog-actions">
+            <button class="secondary-button" type="button" @click="closeSecretEditor">取消</button>
+            <button class="primary-button" type="submit" :disabled="secretEditBusy || !secretEditor.title.trim() || !secretEditor.secretType.trim() || !secretEditor.secretValue.trim()">
+              <LoaderCircle v-if="secretEditBusy" class="spin" :size="16" />
+              <Check v-else :size="16" />保存
+            </button>
+          </div>
+        </form>
+      </div>
+    </Transition>
+
+    <Transition name="modal">
+      <div v-if="secretDeleteTarget" class="modal-layer">
+        <button class="modal-scrim" aria-label="取消删除" @click="closeSecretDelete" />
+        <form class="secret-dialog secret-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="secret-delete-title" @submit.prevent="confirmSecretDelete">
+          <span class="dialog-icon"><Trash2 :size="22" /></span>
+          <h2 id="secret-delete-title">永久删除“{{ secretDeleteTarget.title }}”？</h2>
+          <p>请输入秘密备忘录主密码。密码只用于本次删除验证。</p>
+          <label class="delete-password-field">
+            <span>主密码</span>
+            <input v-model="secretDeletePassword" type="password" minlength="6" maxlength="256" autocomplete="current-password" autofocus placeholder="至少 6 个字符" />
+          </label>
+          <p v-if="secretDeleteError" class="dialog-error">{{ secretDeleteError }}</p>
+          <div class="dialog-actions">
+            <button class="secondary-button" type="button" @click="closeSecretDelete">取消</button>
+            <button class="danger-button" type="submit" :disabled="secretDeleteBusy || secretDeletePassword.length < 6">
+              <LoaderCircle v-if="secretDeleteBusy" class="spin" :size="16" />
+              <Trash2 v-else :size="16" />永久删除
+            </button>
+          </div>
+        </form>
       </div>
     </Transition>
 

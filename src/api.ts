@@ -107,6 +107,15 @@ export interface SecretItem {
   feishuSyncedAt?: number;
 }
 
+export interface UpdateSecretInput {
+  title: string;
+  secretType: string;
+  account?: string;
+  secretValue: string;
+  website?: string;
+  notes?: string;
+}
+
 export interface SecretStashResult {
   secretId: string;
   message: string;
@@ -544,8 +553,13 @@ export async function listSecretItems(): Promise<SecretItem[]> {
   return [];
 }
 
-export async function deleteSecretItem(secretId: string): Promise<void> {
-  if (isTauri) return invoke("delete_secret_item", { secretId });
+export async function updateSecretItem(secretId: string, input: UpdateSecretInput): Promise<SecretItem> {
+  if (isTauri) return invoke("update_secret_item", { secretId, input });
+  return { id: secretId, sourceTitle: "", createdAt: Date.now(), updatedAt: Date.now(), ...input };
+}
+
+export async function deleteSecretItem(secretId: string, password: string): Promise<void> {
+  if (isTauri) return invoke("delete_secret_item", { secretId, password });
 }
 
 export async function stashCapture(): Promise<SecretStashResult> {

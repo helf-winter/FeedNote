@@ -805,6 +805,108 @@ button:disabled {
   color: #1f7e75;
 }
 
+.secret-dialog {
+  position: relative;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 22px;
+  overflow: auto;
+  background: white;
+  border: 1px solid #d9dedb;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.secret-dialog > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.secret-dialog h2 {
+  margin: 4px 0 0;
+  font-size: 18px;
+}
+
+.secret-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.secret-edit-grid label,
+.delete-password-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: #6f7973;
+  font-size: 11px;
+}
+
+.secret-edit-grid input,
+.secret-edit-grid textarea,
+.delete-password-field input {
+  width: 100%;
+  padding: 9px 10px;
+  color: var(--ink);
+  font: inherit;
+  background: #fbfcfb;
+  border: 1px solid #cfd7d2;
+  border-radius: 5px;
+  outline: none;
+}
+
+.secret-edit-grid input,
+.delete-password-field input {
+  height: 39px;
+}
+
+.secret-edit-grid textarea {
+  min-height: 76px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.secret-edit-grid input:focus,
+.secret-edit-grid textarea:focus,
+.delete-password-field input:focus {
+  border-color: #68537e;
+  box-shadow: 0 0 0 3px rgb(104 83 126 / 10%);
+}
+
+.secret-edit-grid .wide-field {
+  grid-column: 1 / -1;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.secret-delete-dialog {
+  width: min(430px, calc(100vw - 32px));
+}
+
+.secret-delete-dialog > p {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.secret-delete-dialog .delete-password-field {
+  margin-top: 18px;
+}
+
+.secret-delete-dialog .dialog-error {
+  color: #b3473d;
+  font-size: 12px;
+}
+
 @media (max-width: 720px) {
   .secrets-toolbar {
     grid-template-columns: 1fr auto;
@@ -816,6 +918,14 @@ button:disabled {
 
   .secret-list {
     grid-template-columns: 1fr;
+  }
+
+  .secret-edit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .secret-edit-grid .wide-field {
+    grid-column: auto;
   }
 }
 

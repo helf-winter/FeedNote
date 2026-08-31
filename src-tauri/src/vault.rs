@@ -14,8 +14,8 @@ use crate::{
     db::Database,
     error::{AppError, AppResult},
     models::{
-        EncryptedSecretRecord, SecretItem, SecretMetadataProposal, SecretPayload, VaultMeta,
-        VaultStatus,
+        EncryptedSecretRecord, SecretItem, SecretMetadataProposal, SecretPayload,
+        UpdateSecretInput, VaultMeta, VaultStatus,
     },
 };
 
@@ -161,8 +161,58 @@ impl Vault {
         Ok(item)
     }
 
-    pub fn delete(&self, database: &Database, id: &str) -> AppResult<()> {
+    pub fn update(
+        &self,
+        database: &Database,
+        id: &str,
+        input: &UpdateSecretInput,
+    ) -> AppResult<SecretItem> {
+        let key = self.current_key()?;
+        let record = database.get_encrypted_secret_record(id)?;
+        let mut item = decrypt_record(&key, &record)?;
+        let title = input.title.trim();
+        let secret_type = input.secret_type.trim();
+        if title.is_empty() || title.chars().count() > 120 {
+            return Err(AppError::Validation(
+                "秘密名称不能为空且不能超过 120 个字符".to_string(),
+            ));
+        }
+        if secret_type.is_empty() || secret_type.chars().count() > 40 {
+            return Err(AppError::Validation(
+                "秘密类型不能为空且不能超过 40 个字符".to_string(),
+            ));
+        }
+        if input.secret_value.trim().is_empty() || input.secret_value.chars().count() > 100_000 {
+            return Err(AppError::Validation("秘密值为空或过长".to_string()));
+        }
+        item.payload.title = title.to_string();
+        item.payload.secret_type = secret_type.to_string();
+        item.payload.account = normalize_optional(input.account.as_deref(), 300);
+        item.payload.secret_value = input.secret_value.clone();
+        item.payload.website = validate_optional_http_url(input.website.as_deref())?;
+        item.payload.notes = normalize_optional(input.notes.as_deref(), 1_000);
+        item.updated_at = Utc::now().timestamp_millis();
+        item.feishu_synced_at = None;
+        let encrypted = encrypt_record(
+            &key,
+            &item.id,
+            &item.payload,
+            item.created_at,
+            item.updated_at,
+            None,
+        )?;
+        database.update_secret_record(&encrypted)?;
+        Ok(item)
+    }
+
+    pub fn delete_with_password(
+        &self,
+        database: &Database,
+        id: &str,
+        password: &str,
+    ) -> AppResult<()> {
         self.current_key()?;
+        self.verify_password(database, password)?;
         database.delete_secret_record(id)
     }
 
@@ -190,6 +240,27 @@ impl Vault {
 
     fn set_key(&self, key: [u8; 32]) {
         *self.key.lock().expect("vault key lock poisoned") = Some(Zeroizing::new(key));
+    }
+
+    fn verify_password(&self, database: &Database, password: &str) -> AppResult<()> {
+        validate_master_password(password)?;
+        let meta = database
+            .get_vault_meta()?
+            .ok_or_else(|| AppError::Vault("请先设置主密码".to_string()))?;
+        let mut key = derive_key(password, &meta.salt)?;
+        let verified = decrypt_bytes(
+            &key,
+            &meta.verifier_nonce,
+            &meta.verifier_ciphertext,
+            VERIFIER_AAD,
+        )
+        .is_ok_and(|value| value == VERIFIER);
+        key.zeroize();
+        if verified {
+            Ok(())
+        } else {
+            Err(AppError::Vault("主密码错误，未删除秘密".to_string()))
+        }
     }
 }
 
@@ -350,6 +421,20 @@ fn normalize_http_url(value: Option<&str>) -> Option<String> {
     matches!(url.scheme(), "http" | "https").then(|| url.to_string())
 }
 
+fn validate_optional_http_url(value: Option<&str>) -> AppResult<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| AppError::Validation("网站必须是有效的 http 或 https 地址".to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AppError::Validation(
+            "网站只允许 http 或 https 地址".to_string(),
+        ));
+    }
+    Ok(Some(url.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +488,55 @@ mod tests {
     fn master_password_requires_at_least_six_characters() {
         assert!(validate_master_password("12345").is_err());
         assert!(validate_master_password("123456").is_ok());
+    }
+
+    #[test]
+    fn editing_reencrypts_fields_and_preserves_the_source() {
+        let database = Database::in_memory().unwrap();
+        let vault = Vault::new();
+        vault.initialize(&database, "123456").unwrap();
+        let item = vault.stash(&database, "old-secret", "原始页面").unwrap();
+
+        let updated = vault
+            .update(
+                &database,
+                &item.id,
+                &UpdateSecretInput {
+                    title: "新名称".to_string(),
+                    secret_type: "令牌".to_string(),
+                    account: Some("demo@example.com".to_string()),
+                    secret_value: "new-secret".to_string(),
+                    website: Some("https://example.com/login".to_string()),
+                    notes: Some("手动更新".to_string()),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.payload.title, "新名称");
+        assert_eq!(updated.payload.secret_value, "new-secret");
+        assert_eq!(updated.payload.source_title, "原始页面");
+        assert_eq!(
+            updated.payload.website.as_deref(),
+            Some("https://example.com/login")
+        );
+        assert!(updated.feishu_synced_at.is_none());
+    }
+
+    #[test]
+    fn permanent_delete_requires_the_master_password_again() {
+        let database = Database::in_memory().unwrap();
+        let vault = Vault::new();
+        vault.initialize(&database, "123456").unwrap();
+        let item = vault.stash(&database, "keep-me", "测试").unwrap();
+
+        assert!(vault
+            .delete_with_password(&database, &item.id, "wrong-password")
+            .is_err());
+        assert_eq!(database.count_secret_records().unwrap(), 1);
+
+        vault
+            .delete_with_password(&database, &item.id, "123456")
+            .unwrap();
+        assert_eq!(database.count_secret_records().unwrap(), 0);
     }
 }

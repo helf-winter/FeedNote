@@ -181,6 +181,7 @@ pub fn run() {
             commands::unlock_vault,
             commands::lock_vault,
             commands::list_secret_items,
+            commands::update_secret_item,
             commands::delete_secret_item,
             commands::stash_capture,
             commands::undo_secret_stash,

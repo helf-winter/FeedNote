@@ -13,7 +13,7 @@ use crate::{
         AppSettings, CaptureCommitResult, CreateFeedInput, CreateFeedResult, DeleteConfirmation,
         FeedEvent, FeishuSecretStatus, FeishuSourceStatus, FeishuSyncStatus, MemoryDetail,
         MemorySummary, PlanItem, PlanProposal, ProcessResult, ReviewItem, SecretItem,
-        SecretStashResult, Stats, UpdateSettingsInput, VaultStatus,
+        SecretStashResult, Stats, UpdateSecretInput, UpdateSettingsInput, VaultStatus,
     },
     windows_selection::{self, SelectionSnapshot},
     AppState, PendingCapture,
@@ -331,12 +331,27 @@ pub fn list_secret_items(state: State<'_, AppState>) -> AppResult<Vec<SecretItem
 #[tauri::command]
 pub fn delete_secret_item(
     secret_id: String,
+    password: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.vault.delete(&state.database, &secret_id)?;
+    state
+        .vault
+        .delete_with_password(&state.database, &secret_id, &password)?;
     let _ = app.emit("vault-changed", &secret_id);
     Ok(())
+}
+
+#[tauri::command]
+pub fn update_secret_item(
+    secret_id: String,
+    input: UpdateSecretInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<SecretItem> {
+    let item = state.vault.update(&state.database, &secret_id, &input)?;
+    let _ = app.emit("vault-changed", &secret_id);
+    Ok(item)
 }
 
 #[tauri::command]

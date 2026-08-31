@@ -184,6 +184,17 @@ pub struct SecretItem {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateSecretInput {
+    pub title: String,
+    pub secret_type: String,
+    pub account: Option<String>,
+    pub secret_value: String,
+    pub website: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SecretMetadataProposal {
     pub title: String,
     pub secret_type: String,
