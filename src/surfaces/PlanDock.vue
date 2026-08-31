@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AlertCircle,
   CalendarClock,
   Check,
+  Droplet,
   ExternalLink,
   Link2,
   LoaderCircle,
@@ -22,13 +23,28 @@ import {
   type PlanItem,
 } from "../api";
 
+const DOCK_OPACITY_KEY = "feednote.plan-dock.opacity";
+
 const expanded = ref(false);
 const plans = ref<PlanItem[]>([]);
 const loading = ref(false);
 const error = ref("");
 const answers = reactive<Record<string, string>>({});
+const dockOpacity = ref(loadDockOpacity());
+const dockStyle = computed(() => ({
+  "--dock-opacity": String(dockOpacity.value / 100),
+}));
 let unlisten: UnlistenFn | undefined;
 let collapsedPointer: { id: number; x: number; y: number } | undefined;
+
+function loadDockOpacity(): number {
+  const stored = Number.parseInt(localStorage.getItem(DOCK_OPACITY_KEY) ?? "", 10);
+  return Number.isFinite(stored) ? Math.min(100, Math.max(45, stored)) : 91;
+}
+
+function saveDockOpacity(): void {
+  localStorage.setItem(DOCK_OPACITY_KEY, String(dockOpacity.value));
+}
 
 onMounted(async () => {
   await refresh();
@@ -52,7 +68,7 @@ async function complete(plan: PlanItem): Promise<void> {
 }
 
 async function startDockDrag(event: MouseEvent): Promise<void> {
-  if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+  if (event.button !== 0 || (event.target as HTMLElement).closest("button, input")) return;
   await getCurrentWindow().startDragging();
 }
 
@@ -171,13 +187,28 @@ function formatTime(timestamp?: number): string {
     <span v-if="plans.length" class="plan-count">{{ Math.min(plans.length, 99) }}</span>
   </button>
 
-  <aside v-else class="plan-dock-panel" aria-label="桌面计划">
+  <aside v-else class="plan-dock-panel" aria-label="桌面计划" :style="dockStyle">
     <header @mousedown="startDockDrag">
       <div class="dock-heading">
         <span class="dock-heading-icon"><CalendarClock :size="17" /></span>
-        <div>
-          <span>桌面计划</span>
-          <strong>{{ plans.length }}</strong>
+        <div class="dock-heading-content">
+          <div class="dock-title-row">
+            <span>桌面计划</span>
+            <strong>{{ plans.length }}</strong>
+          </div>
+          <label class="dock-opacity-control" title="调节面板透明度" @mousedown.stop>
+            <Droplet :size="11" aria-hidden="true" />
+            <input
+              v-model.number="dockOpacity"
+              type="range"
+              min="45"
+              max="100"
+              step="1"
+              aria-label="面板透明度"
+              @input="saveDockOpacity"
+            />
+            <output>{{ dockOpacity }}%</output>
+          </label>
         </div>
       </div>
       <nav>
