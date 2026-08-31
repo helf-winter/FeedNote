@@ -21,6 +21,7 @@ import {
   prepareDragCapture,
   resolvePlanTime,
   setPlanDone,
+  showPlanDockMenu,
   togglePlanDock,
   type PlanItem,
 } from "../api";
@@ -159,6 +160,15 @@ function cancelCollapsedDockPointer(event: PointerEvent): void {
   if (collapsedPointer?.id === event.pointerId) collapsedPointer = undefined;
 }
 
+async function showDockMenu(): Promise<void> {
+  collapsedPointer = undefined;
+  try {
+    await showPlanDockMenu();
+  } catch (reason) {
+    showDropMessage(String(reason));
+  }
+}
+
 async function openLink(plan: PlanItem): Promise<void> {
   const url = planLink(plan);
   if (!url) return;
@@ -237,6 +247,7 @@ function formatTime(timestamp?: number): string {
     @pointermove="continueCollapsedDockDrag"
     @pointerup="finishCollapsedDockPointer"
     @pointercancel="cancelCollapsedDockPointer"
+    @contextmenu.prevent="showDockMenu"
     @keydown.enter.prevent="toggle"
     @keydown.space.prevent="toggle"
     @dragenter="enterTextDrop"
@@ -254,6 +265,7 @@ function formatTime(timestamp?: number): string {
     :class="{ 'text-drop-active': textDropActive }"
     aria-label="桌面计划"
     :style="dockStyle"
+    @contextmenu.prevent="showDockMenu"
     @dragenter="enterTextDrop"
     @dragover="overTextDrop"
     @dragleave="leaveTextDrop"

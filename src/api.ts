@@ -619,6 +619,10 @@ export async function togglePlanDock(): Promise<boolean> {
   return invoke("toggle_plan_dock");
 }
 
+export async function showPlanDockMenu(): Promise<void> {
+  if (isTauri) return invoke("show_plan_dock_menu");
+}
+
 export async function openMainWindow(): Promise<void> {
   return invoke("open_main_window");
 }

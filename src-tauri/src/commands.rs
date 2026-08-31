@@ -3,7 +3,10 @@ use std::{
     sync::atomic::Ordering,
 };
 
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State,
+};
 
 use crate::{
     ai,
@@ -784,6 +787,22 @@ pub fn toggle_plan_dock(app: AppHandle, state: State<'_, AppState>) -> AppResult
     state.dock_expanded.store(expanded, Ordering::Relaxed);
     resize_plan_dock(&app, expanded);
     Ok(expanded)
+}
+
+#[tauri::command]
+pub fn show_plan_dock_menu(app: AppHandle) -> AppResult<()> {
+    let window = app
+        .get_webview_window("plan-dock")
+        .ok_or_else(|| crate::error::AppError::Validation("桌面浮标不可用".to_string()))?;
+    let open_item = MenuItem::with_id(&app, "open", "打开 FeedNote", true, None::<&str>)
+        .map_err(|error| crate::error::AppError::Validation(error.to_string()))?;
+    let quit_item = MenuItem::with_id(&app, "quit", "退出 FeedNote", true, None::<&str>)
+        .map_err(|error| crate::error::AppError::Validation(error.to_string()))?;
+    let menu = Menu::with_items(&app, &[&open_item, &quit_item])
+        .map_err(|error| crate::error::AppError::Validation(error.to_string()))?;
+    window
+        .popup_menu(&menu)
+        .map_err(|error| crate::error::AppError::Validation(error.to_string()))
 }
 
 #[tauri::command]

@@ -17,7 +17,7 @@ use std::{
 use db::Database;
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
@@ -140,17 +140,30 @@ pub fn run() {
             let open_item = MenuItem::with_id(app, "open", "打开 FeedNote", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+            app.on_menu_event(|app, event| match event.id.as_ref() {
+                "open" => show_main_window(app),
+                "quit" => app.exit(0),
+                _ => {}
+            });
             let icon_rgba = make_tray_icon();
             TrayIconBuilder::new()
                 .menu(&menu)
+                .show_menu_on_left_click(false)
                 .tooltip("FeedNote")
                 .icon(tauri::image::Image::new_owned(icon_rgba, 32, 32))
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => show_main_window(app),
-                    "quit" => app.exit(0),
-                    _ => {}
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button,
+                        button_state,
+                        ..
+                    } = event
+                    {
+                        if !tray_click_opens_main(button, button_state) {
+                            return;
+                        }
+                        show_main_window(tray.app_handle());
+                    }
                 })
-                .on_tray_icon_event(|tray, _event| show_main_window(tray.app_handle()))
                 .build(app)?;
 
             let shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
@@ -194,6 +207,7 @@ pub fn run() {
             commands::list_plans,
             commands::set_plan_done,
             commands::toggle_plan_dock,
+            commands::show_plan_dock_menu,
             commands::open_main_window,
             commands::open_external_link,
             commands::test_mobile_push,
@@ -219,6 +233,10 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn tray_click_opens_main(button: MouseButton, state: MouseButtonState) -> bool {
+    button == MouseButton::Left && state == MouseButtonState::Up
+}
+
 fn make_tray_icon() -> Vec<u8> {
     let mut pixels = vec![0_u8; 32 * 32 * 4];
     for y in 0..32 {
@@ -238,4 +256,25 @@ fn make_tray_icon() -> Vec<u8> {
         }
     }
     pixels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_released_left_tray_click_opens_the_main_window() {
+        assert!(tray_click_opens_main(
+            MouseButton::Left,
+            MouseButtonState::Up
+        ));
+        assert!(!tray_click_opens_main(
+            MouseButton::Right,
+            MouseButtonState::Up
+        ));
+        assert!(!tray_click_opens_main(
+            MouseButton::Left,
+            MouseButtonState::Down
+        ));
+    }
 }
