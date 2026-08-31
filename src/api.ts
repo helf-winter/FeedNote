@@ -516,6 +516,10 @@ export async function prepareCapture(): Promise<SelectionSnapshot> {
   return invoke("prepare_capture");
 }
 
+export async function prepareDragCapture(text: string): Promise<SelectionSnapshot> {
+  return invoke("prepare_drag_capture", { text });
+}
+
 export async function getCapturePreview(): Promise<SelectionSnapshot | null> {
   return invoke("get_capture_preview");
 }

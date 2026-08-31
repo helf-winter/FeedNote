@@ -280,6 +280,49 @@ pub fn prepare_capture(app: AppHandle, state: State<'_, AppState>) -> AppResult<
 }
 
 #[tauri::command]
+pub fn prepare_drag_capture(
+    text: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<SelectionSnapshot> {
+    let snapshot = dragged_text_snapshot(&text)?;
+    *state
+        .pending_capture
+        .lock()
+        .expect("pending capture lock poisoned") = Some(PendingCapture {
+        snapshot: snapshot.clone(),
+        feed: None,
+    });
+    state.selection_suppressed.store(true, Ordering::Relaxed);
+    if let Some(dot) = app.get_webview_window("capture-dot") {
+        let _ = dot.hide();
+    }
+    show_drag_capture_menu(&app);
+    let _ = app.emit_to("capture-menu", "capture-prepared", &snapshot);
+    Ok(snapshot)
+}
+
+fn dragged_text_snapshot(text: &str) -> AppResult<SelectionSnapshot> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(crate::error::AppError::Validation(
+            "拖入内容中没有可用文字".to_string(),
+        ));
+    }
+    if text.chars().count() > 4_000 {
+        return Err(crate::error::AppError::Validation(
+            "单次拖入文字不能超过 4000 个字符".to_string(),
+        ));
+    }
+    Ok(SelectionSnapshot {
+        selected_text: text.to_string(),
+        surrounding_text: text.to_string(),
+        source_title: "拖拽到 FeedNote".to_string(),
+        captured_at: chrono::Utc::now().timestamp_millis(),
+    })
+}
+
+#[tauri::command]
 pub fn discard_capture(app: AppHandle, state: State<'_, AppState>) {
     *state
         .pending_capture
@@ -738,13 +781,44 @@ fn show_capture_menu(app: &AppHandle) {
         if x + 300 > right {
             x = position.x - 292;
         }
-        if y + 180 > bottom {
-            y = position.y - 174;
+        if y + 238 > bottom {
+            y = position.y - 232;
         }
         x = x.max(origin.x + 8);
         y = y.max(origin.y + 8);
     }
     let _ = dot.hide();
+    let _ = menu.set_position(PhysicalPosition::new(x, y));
+    let _ = menu.show();
+    let _ = menu.set_focus();
+}
+
+fn show_drag_capture_menu(app: &AppHandle) {
+    let Some(menu) = app.get_webview_window("capture-menu") else {
+        return;
+    };
+    let dock_position = app
+        .get_webview_window("plan-dock")
+        .and_then(|dock| dock.outer_position().ok())
+        .unwrap_or(PhysicalPosition::new(400, 300));
+    let anchor_x = dock_position.x;
+    let anchor_y = dock_position.y + 29;
+    let (mut x, mut y) = (anchor_x - 308, anchor_y - 80);
+    let monitor = app
+        .get_webview_window("plan-dock")
+        .and_then(|dock| dock.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
+        let origin = monitor.position();
+        let size = monitor.size();
+        let right = origin.x + size.width as i32;
+        let bottom = origin.y + size.height as i32;
+        if x < origin.x {
+            x = (anchor_x + 8).min(right - 300);
+        }
+        x = x.clamp(origin.x + 8, (right - 300).max(origin.x + 8));
+        y = y.clamp(origin.y + 8, (bottom - 238).max(origin.y + 8));
+    }
     let _ = menu.set_position(PhysicalPosition::new(x, y));
     let _ = menu.show();
     let _ = menu.set_focus();
@@ -952,5 +1026,19 @@ mod tests {
             proposal.scheduled_for.as_deref(),
             Some("2026-09-01T09:30:00+08:00")
         );
+    }
+
+    #[test]
+    fn dragged_text_capture_accepts_plain_text_without_extra_context() {
+        let snapshot = dragged_text_snapshot("  微信中的文字  ").unwrap();
+        assert_eq!(snapshot.selected_text, "微信中的文字");
+        assert_eq!(snapshot.surrounding_text, "微信中的文字");
+        assert_eq!(snapshot.source_title, "拖拽到 FeedNote");
+    }
+
+    #[test]
+    fn dragged_text_capture_rejects_empty_or_oversized_content() {
+        assert!(dragged_text_snapshot("   ").is_err());
+        assert!(dragged_text_snapshot(&"字".repeat(4_001)).is_err());
     }
 }

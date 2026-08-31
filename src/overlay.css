@@ -332,6 +332,15 @@
   transition: background-color 150ms ease, transform 150ms ease;
 }
 
+.dock-tab.text-drop-active .dock-logo,
+.dock-tab.text-drop-active:hover .dock-logo {
+  background: #f04f87;
+  box-shadow:
+    0 5px 15px rgb(91 22 49 / 34%),
+    0 0 0 4px rgb(240 79 135 / 24%);
+  transform: scale(1.08);
+}
+
 .dock-tab:hover .dock-logo {
   background: #176f67;
   transform: translateX(2px);
@@ -370,6 +379,13 @@
   border-radius: 8px 0 0 8px;
   box-shadow: 0 20px 58px rgb(20 31 25 / 24%);
   backdrop-filter: blur(24px) saturate(125%);
+}
+
+.plan-dock-panel.text-drop-active {
+  border-color: rgb(240 79 135 / 78%);
+  box-shadow:
+    0 20px 58px rgb(20 31 25 / 24%),
+    inset 0 0 0 2px rgb(240 79 135 / 18%);
 }
 
 .plan-dock-panel > header {

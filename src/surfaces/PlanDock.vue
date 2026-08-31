@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { canAcceptTextDrop, droppedPlainText } from "../dropText";
 import {
   AlertCircle,
   CalendarClock,
@@ -17,6 +18,7 @@ import {
   listPlans,
   openExternalLink,
   openMainWindow,
+  prepareDragCapture,
   resolvePlanTime,
   setPlanDone,
   togglePlanDock,
@@ -31,11 +33,15 @@ const loading = ref(false);
 const error = ref("");
 const answers = reactive<Record<string, string>>({});
 const dockOpacity = ref(loadDockOpacity());
+const textDropActive = ref(false);
+const dropMessage = ref("");
 const dockStyle = computed(() => ({
   "--dock-opacity": String(dockOpacity.value / 100),
 }));
 let unlisten: UnlistenFn | undefined;
 let collapsedPointer: { id: number; x: number; y: number } | undefined;
+let dragDepth = 0;
+let dropMessageTimer: number | undefined;
 
 function loadDockOpacity(): number {
   const stored = Number.parseInt(localStorage.getItem(DOCK_OPACITY_KEY) ?? "", 10);
@@ -51,7 +57,56 @@ onMounted(async () => {
   unlisten = await listen("plans-changed", refresh);
 });
 
-onBeforeUnmount(() => unlisten?.());
+onBeforeUnmount(() => {
+  unlisten?.();
+  if (dropMessageTimer) window.clearTimeout(dropMessageTimer);
+});
+
+function enterTextDrop(event: DragEvent): void {
+  event.preventDefault();
+  dragDepth += 1;
+  textDropActive.value = canAcceptTextDrop(event.dataTransfer);
+  if (event.dataTransfer) event.dataTransfer.dropEffect = textDropActive.value ? "copy" : "none";
+}
+
+function overTextDrop(event: DragEvent): void {
+  event.preventDefault();
+  textDropActive.value = canAcceptTextDrop(event.dataTransfer);
+  if (event.dataTransfer) event.dataTransfer.dropEffect = textDropActive.value ? "copy" : "none";
+}
+
+function leaveTextDrop(): void {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) textDropActive.value = false;
+}
+
+async function receiveTextDrop(event: DragEvent): Promise<void> {
+  event.preventDefault();
+  dragDepth = 0;
+  textDropActive.value = false;
+  if (!canAcceptTextDrop(event.dataTransfer)) {
+    showDropMessage("只支持拖入文字");
+    return;
+  }
+  const text = droppedPlainText(event.dataTransfer);
+  if (!text) {
+    showDropMessage("只支持拖入文字");
+    return;
+  }
+  try {
+    await prepareDragCapture(text);
+  } catch (reason) {
+    showDropMessage(String(reason));
+  }
+}
+
+function showDropMessage(message: string): void {
+  dropMessage.value = message;
+  if (dropMessageTimer) window.clearTimeout(dropMessageTimer);
+  dropMessageTimer = window.setTimeout(() => {
+    dropMessage.value = "";
+  }, 2400);
+}
 
 async function toggle(): Promise<void> {
   expanded.value = await togglePlanDock();
@@ -174,6 +229,8 @@ function formatTime(timestamp?: number): string {
   <button
     v-if="!expanded"
     class="dock-tab"
+    :class="{ 'text-drop-active': textDropActive }"
+    :title="dropMessage || 'FeedNote'"
     type="button"
     aria-label="展开计划"
     @pointerdown="prepareCollapsedDockDrag"
@@ -182,12 +239,26 @@ function formatTime(timestamp?: number): string {
     @pointercancel="cancelCollapsedDockPointer"
     @keydown.enter.prevent="toggle"
     @keydown.space.prevent="toggle"
+    @dragenter="enterTextDrop"
+    @dragover="overTextDrop"
+    @dragleave="leaveTextDrop"
+    @drop="receiveTextDrop"
   >
     <span class="dock-logo"><CalendarClock :size="20" /></span>
     <span v-if="plans.length" class="plan-count">{{ Math.min(plans.length, 99) }}</span>
   </button>
 
-  <aside v-else class="plan-dock-panel" aria-label="桌面计划" :style="dockStyle">
+  <aside
+    v-else
+    class="plan-dock-panel"
+    :class="{ 'text-drop-active': textDropActive }"
+    aria-label="桌面计划"
+    :style="dockStyle"
+    @dragenter="enterTextDrop"
+    @dragover="overTextDrop"
+    @dragleave="leaveTextDrop"
+    @drop="receiveTextDrop"
+  >
     <header @mousedown="startDockDrag">
       <div class="dock-heading">
         <span class="dock-heading-icon"><CalendarClock :size="17" /></span>
@@ -279,6 +350,6 @@ function formatTime(timestamp?: number): string {
         </div>
       </article>
     </div>
-    <p v-if="error" class="dock-error">{{ error }}</p>
+    <p v-if="dropMessage || error" class="dock-error">{{ dropMessage || error }}</p>
   </aside>
 </template>

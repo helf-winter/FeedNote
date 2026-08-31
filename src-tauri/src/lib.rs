@@ -114,6 +114,7 @@ pub fn run() {
             .skip_taskbar(true)
             .resizable(false)
             .shadow(false)
+            .disable_drag_drop_handler()
             .build()?;
 
             if let Some(main) = app.get_webview_window("main") {
@@ -174,6 +175,7 @@ pub fn run() {
             commands::check_ai,
             commands::process_feed,
             commands::prepare_capture,
+            commands::prepare_drag_capture,
             commands::discard_capture,
             commands::get_capture_preview,
             commands::get_vault_status,
