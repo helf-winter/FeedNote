@@ -644,14 +644,10 @@ fn validate_application_record(proposal: &ApplicationRecordProposal) -> AppResul
 }
 
 fn application_row_matches(row: &SourceRow, proposal: &ApplicationRecordProposal) -> bool {
-    let proposed_role = proposal
-        .role
-        .as_deref()
-        .map(normalize_role)
-        .unwrap_or_default();
-    company_matches(&row.company, &proposal.company)
-        && !proposed_role.is_empty()
-        && normalize_role(&row.role) == proposed_role
+    let Some(proposed_role) = proposal.role.as_deref() else {
+        return false;
+    };
+    company_matches(&row.company, &proposal.company) && role_matches(&row.role, proposed_role)
 }
 
 fn company_matches(existing: &str, incoming: &str) -> bool {
@@ -699,13 +695,41 @@ fn normalize_role(value: &str) -> String {
         .chars()
         .filter(|character| character.is_alphanumeric())
         .collect();
-    for suffix in ["岗位", "职位"] {
+    for suffix in ["岗位", "职位", "岗"] {
         if let Some(stripped) = value.strip_suffix(suffix) {
             value = stripped.to_string();
             break;
         }
     }
     value
+}
+
+fn role_matches(existing: &str, incoming: &str) -> bool {
+    let existing = normalize_role(existing);
+    let incoming = normalize_role(incoming);
+    if existing.is_empty() || incoming.is_empty() {
+        return false;
+    }
+    existing == incoming || role_alias(&existing) == role_alias(&incoming)
+}
+
+fn role_alias(value: &str) -> &str {
+    match value {
+        "前端"
+        | "前端开发"
+        | "前端研发"
+        | "前端工程师"
+        | "前端开发工程师"
+        | "前端研发工程师"
+        | "web前端"
+        | "web前端开发"
+        | "web前端工程师"
+        | "web前端开发工程师" => "前端",
+        "后端" | "后端开发" | "后端研发" | "后端工程师" | "后端开发工程师" | "后端研发工程师" => {
+            "后端"
+        }
+        _ => value,
+    }
 }
 
 fn application_row(proposal: &ApplicationRecordProposal) -> Vec<Value> {
@@ -2004,7 +2028,7 @@ mod tests {
             row_number: 2,
             status: "简历筛选".to_string(),
             company: "烽火通信科技股份有限公司".to_string(),
-            role: "前端工程师".to_string(),
+            role: "前端开发工程师".to_string(),
         }
     }
 
@@ -2095,10 +2119,28 @@ mod tests {
         ));
         assert!(application_row_matches(
             &row,
-            &application("烽火通信", Some("前端工程师岗位"), None)
+            &application("烽火通信", Some("前端"), None)
+        ));
+        assert!(application_row_matches(
+            &row,
+            &application("烽火通信", Some("前端开发岗位"), None)
+        ));
+        assert!(!application_row_matches(
+            &row,
+            &application("烽火通信", Some("后端开发工程师"), None)
         ));
         assert!(company_matches("烽火通信科技股份有限公司", "烽火通信"));
         assert!(!company_matches("中国移动研究院", "中国移动"));
+    }
+
+    #[test]
+    fn role_aliases_are_controlled() {
+        assert!(role_matches("前端", "前端开发工程师"));
+        assert!(role_matches("Web 前端开发", "前端工程师岗位"));
+        assert!(role_matches("后端研发工程师", "后端开发"));
+        assert!(!role_matches("前端开发工程师", "后端开发工程师"));
+        assert!(!role_matches("测试开发工程师", "测试工程师"));
+        assert!(!role_matches("高级前端开发工程师", "前端开发工程师"));
     }
 
     #[test]
