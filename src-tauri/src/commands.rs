@@ -12,7 +12,7 @@ use crate::{
     models::{
         AppSettings, CaptureCommitResult, CreateFeedInput, CreateFeedResult, DeleteConfirmation,
         FeedEvent, FeishuSourceStatus, FeishuSyncStatus, MemoryDetail, MemorySummary, PlanItem,
-        ProcessResult, ReviewItem, Stats, UpdateSettingsInput,
+        PlanProposal, ProcessResult, ReviewItem, Stats, UpdateSettingsInput,
     },
     windows_selection::{self, SelectionSnapshot},
     AppState, PendingCapture,
@@ -440,16 +440,25 @@ pub async fn resolve_plan_time(
         ));
     }
     let current = state.database.get_plan(&plan_id)?;
+    let occupied_plan_times: Vec<i64> = state
+        .database
+        .list_plans(false)?
+        .into_iter()
+        .filter(|plan| plan.id != plan_id)
+        .filter_map(|plan| plan.scheduled_at)
+        .collect();
     let settings = state.database.get_settings()?;
     let secrets = ai::ProviderSecrets::load(&state.secrets_path)?;
-    let proposal = ai::resolve_plan_time(
+    let mut proposal = ai::resolve_plan_time(
         &settings,
         &secrets,
         &current,
         answer.trim(),
+        &occupied_plan_times,
         &now_in_shanghai(),
     )
     .await?;
+    avoid_delegated_schedule_conflict(&mut proposal, answer.trim(), &occupied_plan_times)?;
     let scheduled_at = parse_scheduled_at(proposal.scheduled_for.as_deref())?;
     let plan = match scheduled_at {
         Some(timestamp) => state
@@ -626,7 +635,147 @@ fn parse_scheduled_at(value: Option<&str>) -> AppResult<Option<i64>> {
         .transpose()
 }
 
+const PLAN_SPACING_MILLIS: i64 = 60 * 60 * 1_000;
+
+fn avoid_delegated_schedule_conflict(
+    proposal: &mut PlanProposal,
+    answer: &str,
+    occupied_plan_times: &[i64],
+) -> AppResult<()> {
+    if !delegates_time_choice(answer) {
+        return Ok(());
+    }
+    let Some(original) = proposal.scheduled_for.as_deref() else {
+        return Ok(());
+    };
+    let original = chrono::DateTime::parse_from_rfc3339(original.trim())
+        .map_err(|_| crate::error::AppError::AiInvalid("计划时间不是有效的 RFC3339".to_string()))?;
+    let original_timestamp = original.timestamp_millis();
+    if !schedule_conflicts(original_timestamp, occupied_plan_times) {
+        return Ok(());
+    }
+
+    let (start_hour, end_hour) = delegated_time_window(answer);
+    let original_date = original.date_naive();
+    for step in 1..=32_i64 {
+        for direction in [1_i64, -1_i64] {
+            let candidate = original + chrono::Duration::minutes(step * 30 * direction);
+            let hour = chrono::Timelike::hour(&candidate);
+            if candidate.date_naive() != original_date || hour < start_hour || hour >= end_hour {
+                continue;
+            }
+            if !schedule_conflicts(candidate.timestamp_millis(), occupied_plan_times) {
+                proposal.scheduled_for = Some(candidate.to_rfc3339());
+                proposal.time_evidence = Some(format!(
+                    "用户授权自动安排；已避开现有计划，调整为 {}",
+                    candidate.format("%Y-%m-%d %H:%M")
+                ));
+                return Ok(());
+            }
+        }
+    }
+
+    proposal.scheduled_for = None;
+    proposal.needs_clarification = true;
+    proposal.clarification_question =
+        Some("这个时段内已有较密集的计划，请指定一个可接受的具体时间。".to_string());
+    proposal.time_evidence = Some("自动安排时未找到间隔至少 60 分钟的空档".to_string());
+    Ok(())
+}
+
+fn delegates_time_choice(answer: &str) -> bool {
+    let normalized: String = answer
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    [
+        "你来安排",
+        "你安排",
+        "帮我安排",
+        "自行安排",
+        "自动安排",
+        "看着安排",
+        "时间都可以",
+        "都可以",
+        "随便",
+        "合适的时间",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase))
+}
+
+fn delegated_time_window(answer: &str) -> (u32, u32) {
+    if answer.contains("上午") || answer.contains("早上") || answer.contains("早晨") {
+        (7, 12)
+    } else if answer.contains("中午") {
+        (11, 14)
+    } else if answer.contains("下午") {
+        (12, 18)
+    } else if answer.contains("晚上") || answer.contains("傍晚") {
+        (18, 23)
+    } else {
+        (7, 23)
+    }
+}
+
+fn schedule_conflicts(candidate: i64, occupied_plan_times: &[i64]) -> bool {
+    occupied_plan_times
+        .iter()
+        .any(|occupied| candidate.abs_diff(*occupied) < PLAN_SPACING_MILLIS as u64)
+}
+
 #[tauri::command]
 pub fn export_data(path: String, state: State<'_, AppState>) -> AppResult<()> {
     state.database.export_json(&PathBuf::from(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scheduled_proposal(time: &str) -> PlanProposal {
+        PlanProposal {
+            title: "面试".to_string(),
+            details: "参加面试".to_string(),
+            content: "面试".to_string(),
+            link_url: None,
+            notes: None,
+            scheduled_for: Some(time.to_string()),
+            time_evidence: Some("用户授权安排".to_string()),
+            needs_clarification: false,
+            clarification_question: None,
+        }
+    }
+
+    #[test]
+    fn delegated_time_moves_to_the_next_non_conflicting_slot() {
+        let occupied = parse_scheduled_at(Some("2026-09-01T09:30:00+08:00"))
+            .unwrap()
+            .unwrap();
+        let mut proposal = scheduled_proposal("2026-09-01T09:30:00+08:00");
+
+        avoid_delegated_schedule_conflict(&mut proposal, "明天上午，时间你来安排", &[occupied])
+            .unwrap();
+
+        assert_eq!(
+            proposal.scheduled_for.as_deref(),
+            Some("2026-09-01T10:30:00+08:00")
+        );
+        assert!(!proposal.needs_clarification);
+    }
+
+    #[test]
+    fn explicit_time_is_never_moved_automatically() {
+        let occupied = parse_scheduled_at(Some("2026-09-01T09:30:00+08:00"))
+            .unwrap()
+            .unwrap();
+        let mut proposal = scheduled_proposal("2026-09-01T09:30:00+08:00");
+
+        avoid_delegated_schedule_conflict(&mut proposal, "明天上午九点半", &[occupied]).unwrap();
+
+        assert_eq!(
+            proposal.scheduled_for.as_deref(),
+            Some("2026-09-01T09:30:00+08:00")
+        );
+    }
 }
