@@ -122,6 +122,26 @@ export interface SecretStashResult {
   undoUntil: number;
 }
 
+export interface MemoItem {
+  id: string;
+  content: string;
+  sourceTitle: string;
+  createdAt: number;
+  feishuSyncedAt?: number;
+}
+
+export interface MemoCaptureResult {
+  memoId: string;
+  message: string;
+}
+
+export interface FeishuMemoStatus {
+  configured: boolean;
+  spreadsheetUrl?: string;
+  pendingMemos: number;
+  lastError?: string;
+}
+
 export interface FeishuSecretStatus {
   enabled: boolean;
   configured: boolean;
@@ -524,6 +544,15 @@ export async function getCapturePreview(): Promise<SelectionSnapshot | null> {
   return invoke("get_capture_preview");
 }
 
+export async function recordMemoCapture(): Promise<MemoCaptureResult> {
+  return invoke("record_memo_capture");
+}
+
+export async function listMemos(limit = 500): Promise<MemoItem[]> {
+  if (isTauri) return invoke("list_memos", { limit });
+  return [];
+}
+
 export async function discardCapture(): Promise<void> {
   return invoke("discard_capture");
 }
@@ -631,6 +660,16 @@ export async function getFeishuSecretStatus(): Promise<FeishuSecretStatus> {
 
 export async function syncFeishuSecretsNow(): Promise<string> {
   if (isTauri) return invoke("sync_feishu_secrets_now");
+  throw new Error("浏览器预览不会读取飞书应用凭证，请在桌面应用中同步");
+}
+
+export async function getFeishuMemoStatus(): Promise<FeishuMemoStatus> {
+  if (isTauri) return invoke("get_feishu_memo_status");
+  return { configured: false, pendingMemos: 0 };
+}
+
+export async function syncFeishuMemosNow(): Promise<string> {
+  if (isTauri) return invoke("sync_feishu_memos_now");
   throw new Error("浏览器预览不会读取飞书应用凭证，请在桌面应用中同步");
 }
 

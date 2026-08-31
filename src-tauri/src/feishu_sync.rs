@@ -17,9 +17,9 @@ use crate::{
     db::Database,
     error::{AppError, AppResult},
     models::{
-        ApplicationRecordProposal, ApplicationWriteResult, FeishuPlanTaskMapping,
-        FeishuSecretStatus, FeishuSheetState, FeishuSourceStatus, FeishuSyncStatus, PlanItem,
-        SecretItem,
+        ApplicationRecordProposal, ApplicationWriteResult, FeishuMemoStatus, FeishuPlanTaskMapping,
+        FeishuSecretStatus, FeishuSheetState, FeishuSourceStatus, FeishuSyncStatus, MemoItem,
+        PlanItem, SecretItem,
     },
     secrets::parse_env,
     vault::Vault,
@@ -27,6 +27,7 @@ use crate::{
 
 const API_BASE: &str = "https://open.feishu.cn/open-apis";
 const SHEET_TITLE: &str = "FeedNote 计划";
+const MEMO_SHEET_TITLE: &str = "FeedNote 备忘录";
 const SECRET_SHEET_TITLE: &str = "FeedNote 秘密";
 const TASK_REMINDER_MINUTES: i64 = 180;
 const HEADERS: [&str; 9] = [
@@ -51,6 +52,7 @@ const SECRET_HEADERS: [&str; 8] = [
     "备注",
     "更新时间",
 ];
+const MEMO_HEADERS: [&str; 4] = ["本地备忘ID", "内容", "来源", "记录时间"];
 
 struct CachedTenantToken {
     app_id: String,
@@ -124,9 +126,13 @@ pub fn start_scheduler(
             let cleanup_pending = database
                 .list_feishu_plan_cleanup_ids()
                 .is_ok_and(|plan_ids| !plan_ids.is_empty());
+            let memo_pending = database
+                .count_pending_feishu_memos()
+                .is_ok_and(|pending| pending > 0);
             if settings.feishu_sync_enabled
                 || settings.feishu_task_reminders_enabled
                 || settings.feishu_secret_enabled
+                || memo_pending
                 || cleanup_pending
             {
                 if let Some(_guard) = SyncGuard::acquire(&syncing) {
@@ -168,6 +174,17 @@ pub fn start_scheduler(
                             }
                         }
                     }
+                    if memo_pending {
+                        match sync_memo_pending(&database, &secrets_path).await {
+                            Ok(_) => {
+                                let _ = database.save_feishu_memo_sync_error(None);
+                            }
+                            Err(error) => {
+                                let _ =
+                                    database.save_feishu_memo_sync_error(Some(&error.to_string()));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -198,6 +215,40 @@ pub fn secret_status(database: &Database, secrets_path: &Path) -> AppResult<Feis
         spreadsheet_url: state.map(|state| state.spreadsheet_url),
         pending_secrets: database.count_pending_feishu_secrets()?,
         last_error: database.get_feishu_secret_sync_error()?,
+    })
+}
+
+pub fn memo_status(database: &Database, secrets_path: &Path) -> AppResult<FeishuMemoStatus> {
+    let state = database.get_feishu_memo_sheet_state()?;
+    Ok(FeishuMemoStatus {
+        configured: FeishuSecrets::is_configured(secrets_path),
+        spreadsheet_url: state.map(|state| state.spreadsheet_url),
+        pending_memos: database.count_pending_feishu_memos()?,
+        last_error: database.get_feishu_memo_sync_error()?,
+    })
+}
+
+pub async fn sync_memos_now(
+    database: &Database,
+    secrets_path: &Path,
+    syncing: &AtomicBool,
+) -> AppResult<String> {
+    let _guard = SyncGuard::acquire(syncing)
+        .ok_or_else(|| AppError::FeishuUnavailable("同步正在进行，请稍后查看状态".to_string()))?;
+    let synced = match sync_memo_pending(database, secrets_path).await {
+        Ok(synced) => {
+            database.save_feishu_memo_sync_error(None)?;
+            synced
+        }
+        Err(error) => {
+            database.save_feishu_memo_sync_error(Some(&error.to_string()))?;
+            return Err(error);
+        }
+    };
+    Ok(if synced == 0 {
+        "飞书备忘录已同步".to_string()
+    } else {
+        format!("已同步 {synced} 条备忘录到飞书")
     })
 }
 
@@ -1226,6 +1277,169 @@ async fn sync_pending(
     Ok(pulled + pending.len())
 }
 
+async fn sync_memo_pending(database: &Database, secrets_path: &Path) -> AppResult<usize> {
+    let pending = database.list_pending_feishu_memos(500)?;
+    let existing_state = database.get_feishu_memo_sheet_state()?;
+    if pending.is_empty() && existing_state.is_none() {
+        return Ok(0);
+    }
+
+    let secrets = FeishuSecrets::load(secrets_path)?;
+    let client = client()?;
+    let token = tenant_access_token(&client, &secrets).await?;
+    let state = match existing_state {
+        Some(state) => state,
+        None => create_memo_sheet(database, &client, &token).await?,
+    };
+    let rows = read_memo_rows(&client, &token, &state).await?;
+    if rows.is_empty() {
+        write_values(
+            &client,
+            &token,
+            &state,
+            "A1:D1",
+            vec![MEMO_HEADERS.iter().map(|value| json!(value)).collect()],
+        )
+        .await?;
+    }
+    for memo in &pending {
+        if !rows.contains_key(&memo.id) {
+            append_memo_values(&client, &token, &state, vec![memo_row(memo)]).await?;
+        }
+    }
+
+    let verified_rows = read_memo_rows(&client, &token, &state).await?;
+    let missing = pending
+        .iter()
+        .filter(|memo| !verified_rows.contains_key(&memo.id))
+        .count();
+    if missing > 0 {
+        return Err(AppError::FeishuUnavailable(format!(
+            "备忘录表回读未找到 {missing} 条记录，本地仍保留为待同步"
+        )));
+    }
+    let synced_at = Utc::now().timestamp_millis();
+    for memo in &pending {
+        database.mark_memo_feishu_synced(&memo.id, synced_at)?;
+    }
+    Ok(pending.len())
+}
+
+async fn create_memo_sheet(
+    database: &Database,
+    client: &Client,
+    token: &str,
+) -> AppResult<FeishuSheetState> {
+    let response = client
+        .post(format!("{API_BASE}/sheets/v3/spreadsheets"))
+        .bearer_auth(token)
+        .json(&json!({ "title": MEMO_SHEET_TITLE }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let spreadsheet = &payload["data"]["spreadsheet"];
+    let spreadsheet_token = string_field(spreadsheet, "spreadsheet_token")?;
+    let spreadsheet_url = spreadsheet["url"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("https://feishu.cn/sheets/{spreadsheet_token}"));
+    let response = client
+        .get(format!(
+            "{API_BASE}/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let sheet_id = payload["data"]["sheets"]
+        .as_array()
+        .and_then(|sheets| sheets.first())
+        .and_then(|sheet| sheet["sheet_id"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::FeishuUnavailable("新备忘录表没有工作表".to_string()))?;
+    let state = FeishuSheetState {
+        spreadsheet_token,
+        sheet_id,
+        spreadsheet_url,
+    };
+    database.save_feishu_memo_sheet_state(&state)?;
+    Ok(state)
+}
+
+async fn read_memo_rows(
+    client: &Client,
+    token: &str,
+    state: &FeishuSheetState,
+) -> AppResult<HashMap<String, usize>> {
+    let range = format!("{}!A:A", state.sheet_id);
+    let mut url = Url::parse(&format!(
+        "{API_BASE}/sheets/v2/spreadsheets/{}/values/",
+        state.spreadsheet_token
+    ))
+    .map_err(|_| AppError::FeishuUnavailable("飞书备忘录表读取地址无效".to_string()))?;
+    url.path_segments_mut()
+        .map_err(|_| AppError::FeishuUnavailable("飞书备忘录表读取地址无效".to_string()))?
+        .pop_if_empty()
+        .push(&range);
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let values = payload["data"]["valueRange"]["values"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Ok(values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let id = row.as_array()?.first().map(cell_text)?;
+            (!id.is_empty() && id != MEMO_HEADERS[0]).then_some((id, index + 1))
+        })
+        .collect())
+}
+
+async fn append_memo_values(
+    client: &Client,
+    token: &str,
+    state: &FeishuSheetState,
+    values: Vec<Vec<Value>>,
+) -> AppResult<()> {
+    let response = client
+        .post(format!(
+            "{API_BASE}/sheets/v2/spreadsheets/{}/values_append?insertDataOption=INSERT_ROWS",
+            state.spreadsheet_token
+        ))
+        .bearer_auth(token)
+        .json(&json!({
+            "valueRange": {
+                "range": format!("{}!A:D", state.sheet_id),
+                "values": values,
+            }
+        }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    checked_json(response).await.map(|_| ())
+}
+
+fn memo_row(item: &MemoItem) -> Vec<Value> {
+    [
+        item.id.clone(),
+        item.content.clone(),
+        item.source_title.clone(),
+        format_time(item.created_at),
+    ]
+    .into_iter()
+    .map(|value| json!(safe_cell(&value)))
+    .collect()
+}
+
 async fn sync_secret_pending(
     database: &Database,
     secrets_path: &Path,
@@ -1852,6 +2066,21 @@ mod tests {
         assert_eq!(row[2], json!("'=危险标题"));
         assert_eq!(row[4], json!("'+secret-value"));
         assert!(!SECRET_HEADERS.contains(&"周边上下文"));
+    }
+
+    #[test]
+    fn memo_rows_only_contain_the_explicit_record_fields() {
+        let item = MemoItem {
+            id: "memo-id".to_string(),
+            content: "=创业想法".to_string(),
+            source_title: "微信".to_string(),
+            created_at: 1_788_142_920_000,
+            feishu_synced_at: None,
+        };
+        let row = memo_row(&item);
+        assert_eq!(MEMO_HEADERS, ["本地备忘ID", "内容", "来源", "记录时间"]);
+        assert_eq!(row.len(), 4);
+        assert_eq!(row[1], json!("'=创业想法"));
     }
 
     #[test]

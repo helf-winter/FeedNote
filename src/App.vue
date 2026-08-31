@@ -41,6 +41,7 @@ import {
   deleteFeed,
   exportArchive,
   getFeishuSourceStatus,
+  getFeishuMemoStatus,
   getFeishuSecretStatus,
   getFeishuSyncStatus,
   getMemory,
@@ -50,6 +51,7 @@ import {
   isTauri,
   listFeeds,
   listMemories,
+  listMemos,
   listReviews,
   listSecretItems,
   lockVault,
@@ -60,6 +62,7 @@ import {
   initializeVault,
   openExternalLink,
   syncFeishuNow,
+  syncFeishuMemosNow,
   syncFeishuSecretsNow,
   syncFeishuSourceNow,
   testMobilePush,
@@ -69,10 +72,12 @@ import {
   type AppSettings,
   type FeedEvent,
   type FeishuSourceStatus,
+  type FeishuMemoStatus,
   type FeishuSecretStatus,
   type FeishuSyncStatus,
   type MemoryDetail,
   type MemorySummary,
+  type MemoItem,
   type Page,
   type ReviewItem,
   type Stats,
@@ -99,6 +104,7 @@ const memorySearch = ref("");
 const memoryType = ref("");
 const feeds = ref<FeedEvent[]>([]);
 const memories = ref<MemorySummary[]>([]);
+const memos = ref<MemoItem[]>([]);
 const reviews = ref<ReviewItem[]>([]);
 const stats = ref<Stats>({ totalFeeds: 0, totalMemories: 0, pendingReviews: 0, pendingProcessing: 0 });
 const settings = ref<AppSettings>({
@@ -143,6 +149,12 @@ const feishuSecretStatus = ref<FeishuSecretStatus>({
   enabled: false,
   configured: false,
   pendingSecrets: 0,
+});
+const feishuMemoState = ref<"idle" | "syncing" | "success" | "error">("idle");
+const feishuMemoMessage = ref("");
+const feishuMemoStatus = ref<FeishuMemoStatus>({
+  configured: false,
+  pendingMemos: 0,
 });
 const feishuSourceState = ref<"idle" | "syncing" | "success" | "error">("idle");
 const feishuSourceMessage = ref("");
@@ -210,6 +222,7 @@ const memoryTypes = [
 
 const canSubmit = computed(() => composer.value.trim().length > 0 && !saving.value);
 let stopVaultListener: (() => void) | undefined;
+let stopMemoListener: (() => void) | undefined;
 
 onMounted(async () => {
   await refreshAll();
@@ -224,6 +237,9 @@ onMounted(async () => {
       if (activePage.value === "secrets" && vaultStatus.value.unlocked) {
         void refreshSecretVault();
       }
+    });
+    stopMemoListener = await listen("memos-changed", () => {
+      if (activePage.value === "memo") void refreshMemos();
     });
   }
   window.addEventListener("keydown", (event) => {
@@ -242,7 +258,10 @@ onMounted(async () => {
   });
 });
 
-onBeforeUnmount(() => stopVaultListener?.());
+onBeforeUnmount(() => {
+  stopVaultListener?.();
+  stopMemoListener?.();
+});
 
 async function refreshAll(): Promise<void> {
   loading.value = true;
@@ -441,6 +460,36 @@ async function openFeishuSecretSheet(): Promise<void> {
   await openExternalLink(feishuSecretStatus.value.spreadsheetUrl);
 }
 
+async function refreshMemos(): Promise<void> {
+  try {
+    const [nextMemos, nextStatus] = await Promise.all([listMemos(), getFeishuMemoStatus()]);
+    memos.value = nextMemos;
+    feishuMemoStatus.value = nextStatus;
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  }
+}
+
+async function runFeishuMemoSync(): Promise<void> {
+  if (feishuMemoState.value === "syncing") return;
+  feishuMemoState.value = "syncing";
+  feishuMemoMessage.value = "正在同步飞书备忘录...";
+  try {
+    feishuMemoMessage.value = await syncFeishuMemosNow();
+    feishuMemoState.value = "success";
+    await refreshMemos();
+  } catch (error) {
+    feishuMemoMessage.value = errorMessage(error);
+    feishuMemoState.value = "error";
+    await refreshMemos();
+  }
+}
+
+async function openFeishuMemoSheet(): Promise<void> {
+  if (!feishuMemoStatus.value.spreadsheetUrl) return;
+  await openExternalLink(feishuMemoStatus.value.spreadsheetUrl);
+}
+
 async function refreshFeishuSourceStatus(): Promise<void> {
   try {
     feishuSourceStatus.value = await getFeishuSourceStatus();
@@ -492,6 +541,7 @@ function navigate(page: Page): void {
   activePage.value = page;
   sidebarOpen.value = false;
   if (page === "inbox") nextTick(() => composerElement.value?.focus());
+  if (page === "memo") void refreshMemos();
   if (page === "secrets") void refreshSecretVault();
 }
 
@@ -868,9 +918,35 @@ function typeLabel(type: string): string {
       </section>
 
       <section v-else-if="activePage === 'memo'" class="page memo-page">
-        <div class="empty-state">
+        <div class="memo-toolbar">
+          <span>{{ memos.length }} 条备忘<span v-if="feishuMemoStatus.pendingMemos"> · {{ feishuMemoStatus.pendingMemos }} 条待同步</span></span>
+          <div>
+            <button class="secondary-button" type="button" :disabled="feishuMemoState === 'syncing' || !feishuMemoStatus.configured" @click="runFeishuMemoSync">
+              <LoaderCircle v-if="feishuMemoState === 'syncing'" class="spin" :size="15" />
+              <RefreshCw v-else :size="15" />同步
+            </button>
+            <button v-if="feishuMemoStatus.spreadsheetUrl" class="secondary-button" type="button" @click="openFeishuMemoSheet">
+              <ExternalLink :size="15" />打开飞书表格
+            </button>
+          </div>
+        </div>
+        <p v-if="feishuMemoMessage" class="connection-result" :class="feishuMemoState">{{ feishuMemoMessage }}</p>
+        <p v-else-if="feishuMemoStatus.lastError" class="connection-result error">{{ feishuMemoStatus.lastError }}</p>
+        <div v-if="memos.length === 0" class="empty-state">
           <NotebookPen :size="28" />
           <strong>还没有备忘内容</strong>
+          <span>选中文字后点击 FeedNote 浮球，再选择“记”。</span>
+        </div>
+        <div v-else class="memo-list">
+          <article v-for="memo in memos" :key="memo.id" class="memo-card">
+            <span class="memo-card-icon"><NotebookPen :size="17" /></span>
+            <p>{{ memo.content }}</p>
+            <footer>
+              <span>{{ memo.sourceTitle || '未知来源' }}</span>
+              <span>{{ formatTime(memo.createdAt) }}</span>
+              <span :class="memo.feishuSyncedAt ? 'memo-synced' : 'memo-pending'">{{ memo.feishuSyncedAt ? '已同步飞书' : '等待同步' }}</span>
+            </footer>
+          </article>
         </div>
       </section>
 

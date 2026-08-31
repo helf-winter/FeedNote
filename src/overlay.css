@@ -120,7 +120,7 @@
 
 .feed-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
 }
 
@@ -136,6 +136,21 @@
   color: #666d68;
   background: white;
   border: 1px solid #d8ddda;
+}
+
+.memo-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #76551d;
+  background: rgb(255 249 235 / 94%);
+  border: 1px solid #e7d5ab;
+}
+
+.memo-button:hover {
+  color: #62430e;
+  background: #fff3d4;
 }
 
 .stash-button {
@@ -154,8 +169,10 @@
 }
 
 .feed-button {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   color: white;
   background: #1f7e75;
   border: 1px solid #1f7e75;

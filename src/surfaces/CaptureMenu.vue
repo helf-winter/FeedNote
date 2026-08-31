@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { CalendarClock, Check, LockKeyhole, LoaderCircle, Undo2, X } from "lucide-vue-next";
+import { CalendarClock, Check, LockKeyhole, LoaderCircle, NotebookPen, Send, Undo2, X } from "lucide-vue-next";
 import {
   commitCapture,
   discardCapture,
@@ -9,6 +9,7 @@ import {
   getVaultStatus,
   initializeVault,
   resolvePlanTime,
+  recordMemoCapture,
   stashCapture,
   undoSecretStash,
   unlockVault,
@@ -28,7 +29,7 @@ const vaultAuthVisible = ref(false);
 const masterPassword = ref("");
 const confirmPassword = ref("");
 const stashedSecretId = ref("");
-const activeAction = ref<"feed" | "stash" | "">("");
+const activeAction = ref<"feed" | "memo" | "stash" | "">("");
 let unlisten: UnlistenFn | undefined;
 let closeTimer: number | undefined;
 
@@ -90,6 +91,27 @@ async function stash(): Promise<void> {
     return;
   }
   await stashNow();
+}
+
+async function remember(): Promise<void> {
+  if (busy.value || !snapshot.value) return;
+  busy.value = true;
+  activeAction.value = "memo";
+  error.value = "";
+  try {
+    const result = await recordMemoCapture();
+    resultMessage.value = result.message;
+    snapshot.value = null;
+    closeTimer = window.setTimeout(async () => {
+      await discardCapture();
+      reset();
+    }, 1400);
+  } catch (reason) {
+    error.value = String(reason);
+  } finally {
+    busy.value = false;
+    activeAction.value = "";
+  }
 }
 
 async function authorizeVaultAndStash(): Promise<void> {
@@ -240,13 +262,17 @@ function clearCloseTimer(): void {
     <template v-else>
       <blockquote>{{ snapshot?.selectedText || "正在读取选区..." }}</blockquote>
       <div class="feed-actions">
-        <button class="stash-button" type="button" :disabled="busy || !snapshot" @click="stash">
+        <button class="feed-button" type="button" title="交给 AI 处理" :disabled="busy || !snapshot" @click="feed">
+          <LoaderCircle v-if="busy && activeAction === 'feed'" class="spin" :size="15" />
+          <template v-else><Send :size="14" /><span>喂</span></template>
+        </button>
+        <button class="memo-button" type="button" title="记入普通备忘录并同步飞书" :disabled="busy || !snapshot" @click="remember">
+          <LoaderCircle v-if="busy && activeAction === 'memo'" class="spin" :size="15" />
+          <template v-else><NotebookPen :size="14" /><span>记</span></template>
+        </button>
+        <button class="stash-button" type="button" title="藏入加密秘密备忘录" :disabled="busy || !snapshot" @click="stash">
           <LoaderCircle v-if="busy && activeAction === 'stash'" class="spin" :size="15" />
           <template v-else><LockKeyhole :size="14" /><span>藏</span></template>
-        </button>
-        <button class="feed-button" type="button" :disabled="busy || !snapshot" @click="feed">
-          <LoaderCircle v-if="busy && activeAction === 'feed'" class="spin" :size="15" />
-          <span v-else>喂</span>
         </button>
       </div>
     </template>

@@ -219,6 +219,32 @@ pub struct SecretStashResult {
     pub undo_until: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoItem {
+    pub id: String,
+    pub content: String,
+    pub source_title: String,
+    pub created_at: i64,
+    pub feishu_synced_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoCaptureResult {
+    pub memo_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuMemoStatus {
+    pub configured: bool,
+    pub spreadsheet_url: Option<String>,
+    pub pending_memos: i64,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuSecretStatus {

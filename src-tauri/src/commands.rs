@@ -11,9 +11,10 @@ use crate::{
     feishu_sync, mobile_push,
     models::{
         AppSettings, CaptureCommitResult, CreateFeedInput, CreateFeedResult, DeleteConfirmation,
-        FeedEvent, FeishuSecretStatus, FeishuSourceStatus, FeishuSyncStatus, MemoryDetail,
-        MemorySummary, PlanItem, PlanProposal, ProcessResult, ReviewItem, SecretItem,
-        SecretStashResult, Stats, UpdateSecretInput, UpdateSettingsInput, VaultStatus,
+        FeedEvent, FeishuMemoStatus, FeishuSecretStatus, FeishuSourceStatus, FeishuSyncStatus,
+        MemoCaptureResult, MemoItem, MemoryDetail, MemorySummary, PlanItem, PlanProposal,
+        ProcessResult, ReviewItem, SecretItem, SecretStashResult, Stats, UpdateSecretInput,
+        UpdateSettingsInput, VaultStatus,
     },
     windows_selection::{self, SelectionSnapshot},
     AppState, PendingCapture,
@@ -185,6 +186,16 @@ pub async fn sync_feishu_secrets_now(state: State<'_, AppState>) -> AppResult<St
 }
 
 #[tauri::command]
+pub fn get_feishu_memo_status(state: State<'_, AppState>) -> AppResult<FeishuMemoStatus> {
+    feishu_sync::memo_status(&state.database, &state.secrets_path)
+}
+
+#[tauri::command]
+pub async fn sync_feishu_memos_now(state: State<'_, AppState>) -> AppResult<String> {
+    feishu_sync::sync_memos_now(&state.database, &state.secrets_path, &state.feishu_syncing).await
+}
+
+#[tauri::command]
 pub fn get_feishu_source_status(state: State<'_, AppState>) -> AppResult<FeishuSourceStatus> {
     feishu_sync::source_status(&state.database, &state.secrets_path)
 }
@@ -339,6 +350,50 @@ pub fn get_capture_preview(state: State<'_, AppState>) -> Option<SelectionSnapsh
         .expect("pending capture lock poisoned")
         .as_ref()
         .map(|capture| capture.snapshot.clone())
+}
+
+#[tauri::command]
+pub fn list_memos(limit: Option<i64>, state: State<'_, AppState>) -> AppResult<Vec<MemoItem>> {
+    state.database.list_memos(limit.unwrap_or(500))
+}
+
+#[tauri::command]
+pub fn record_memo_capture(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<MemoCaptureResult> {
+    let snapshot = state
+        .pending_capture
+        .lock()
+        .expect("pending capture lock poisoned")
+        .as_ref()
+        .map(|capture| capture.snapshot.clone())
+        .ok_or_else(|| {
+            crate::error::AppError::Validation("选区授权已失效，请重新选择".to_string())
+        })?;
+    let memo = state
+        .database
+        .create_memo(&snapshot.selected_text, &snapshot.source_title)?;
+    *state
+        .pending_capture
+        .lock()
+        .expect("pending capture lock poisoned") = None;
+    let _ = app.emit("memos-changed", &memo);
+
+    let database = state.database.clone();
+    let secrets_path = state.secrets_path.clone();
+    let sync_guard = state.feishu_syncing.clone();
+    let sync_app = app.clone();
+    let memo_id = memo.id.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = feishu_sync::sync_memos_now(&database, &secrets_path, &sync_guard).await;
+        let _ = sync_app.emit("memos-changed", &memo_id);
+    });
+
+    Ok(MemoCaptureResult {
+        memo_id: memo.id,
+        message: "已记入备忘录，正在同步飞书".to_string(),
+    })
 }
 
 #[tauri::command]

@@ -631,6 +631,101 @@ button:disabled {
   line-height: 1.6;
 }
 
+.memo-page {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.memo-toolbar {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memo-toolbar > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.memo-toolbar > div {
+  display: flex;
+  gap: 8px;
+}
+
+.memo-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.memo-card {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-content: start;
+  min-height: 132px;
+  padding: 16px;
+  gap: 10px 12px;
+  background: #fff;
+  border: 1px solid #dce1de;
+  border-left: 3px solid #c79b45;
+  border-radius: 7px;
+  box-shadow: 0 7px 20px rgb(35 45 39 / 5%);
+}
+
+.memo-card-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: #76551d;
+  background: #fff3d4;
+  border-radius: 6px;
+}
+
+.memo-card p {
+  margin: 1px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.memo-card footer {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.memo-card footer span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memo-card footer span:nth-child(2) {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.memo-synced {
+  color: var(--teal-dark);
+  white-space: nowrap;
+}
+
+.memo-pending {
+  color: #9a6817;
+  white-space: nowrap;
+}
+
 .secrets-page {
   display: grid;
   align-content: start;

@@ -9,7 +9,7 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, EncryptedSecretRecord,
-        FeedEvent, FeishuPlanTaskMapping, FeishuSheetState, MemoryDetail, MemorySummary,
+        FeedEvent, FeishuPlanTaskMapping, FeishuSheetState, MemoItem, MemoryDetail, MemorySummary,
         MemoryVersion, PlanItem, PlanProposal, ReviewItem, Stats, VaultMeta,
     },
 };
@@ -193,6 +193,14 @@ impl Database {
                 feishu_synced_at INTEGER
             );
 
+            CREATE TABLE IF NOT EXISTS memo_records (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                source_title TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                feishu_synced_at INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS feishu_secret_cleanup_queue (
                 secret_id TEXT PRIMARY KEY
             );
@@ -210,6 +218,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_versions_memory ON memory_versions(memory_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_review_status ON review_items(status, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_plans_status_time ON plans(status, scheduled_at, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_memo_created ON memo_records(created_at DESC);
 
             INSERT OR IGNORE INTO feishu_plan_cleanup_queue (plan_id)
             SELECT plan_id FROM feishu_source_rows WHERE plan_id IS NOT NULL;
@@ -1414,6 +1423,113 @@ impl Database {
         count(&connection, "SELECT COUNT(*) FROM secret_records")
     }
 
+    pub fn create_memo(&self, content: &str, source_title: &str) -> AppResult<MemoItem> {
+        let content = content.trim();
+        if content.is_empty() {
+            return Err(AppError::Validation("备忘内容不能为空".to_string()));
+        }
+        if content.chars().count() > 4_000 {
+            return Err(AppError::Validation(
+                "单条备忘内容不能超过 4000 个字符".to_string(),
+            ));
+        }
+        let item = MemoItem {
+            id: Uuid::new_v4().to_string(),
+            content: content.to_string(),
+            source_title: truncate(source_title.trim(), 300).to_string(),
+            created_at: Utc::now().timestamp_millis(),
+            feishu_synced_at: None,
+        };
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute(
+            "INSERT INTO memo_records (id, content, source_title, created_at, feishu_synced_at)
+             VALUES (?1, ?2, ?3, ?4, NULL)",
+            params![item.id, item.content, item.source_title, item.created_at],
+        )?;
+        Ok(item)
+    }
+
+    pub fn list_memos(&self, limit: i64) -> AppResult<Vec<MemoItem>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, content, source_title, created_at, feishu_synced_at
+             FROM memo_records ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit.clamp(1, 100_000)], map_memo)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn list_pending_feishu_memos(&self, limit: i64) -> AppResult<Vec<MemoItem>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, content, source_title, created_at, feishu_synced_at
+             FROM memo_records WHERE feishu_synced_at IS NULL
+             ORDER BY created_at LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit.clamp(1, 500)], map_memo)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn count_pending_feishu_memos(&self) -> AppResult<i64> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM memo_records WHERE feishu_synced_at IS NULL",
+        )
+    }
+
+    pub fn mark_memo_feishu_synced(&self, id: &str, synced_at: i64) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let changed = connection.execute(
+            "UPDATE memo_records SET feishu_synced_at = ?2 WHERE id = ?1",
+            params![id, synced_at],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("备忘录不存在".to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn get_feishu_memo_sheet_state(&self) -> AppResult<Option<FeishuSheetState>> {
+        self.get_json_setting("feishu_memo_sheet")
+    }
+
+    pub fn save_feishu_memo_sheet_state(&self, state: &FeishuSheetState) -> AppResult<()> {
+        self.save_json_setting("feishu_memo_sheet", state)?;
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute("UPDATE memo_records SET feishu_synced_at = NULL", [])?;
+        Ok(())
+    }
+
+    pub fn get_feishu_memo_sync_error(&self) -> AppResult<Option<String>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'feishu_memo_sync_error'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn save_feishu_memo_sync_error(&self, error: Option<&str>) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        if let Some(error) = error {
+            connection.execute(
+                "INSERT INTO settings (key, value) VALUES ('feishu_memo_sync_error', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [truncate(error, 2_000)],
+            )?;
+        } else {
+            connection.execute(
+                "DELETE FROM settings WHERE key = 'feishu_memo_sync_error'",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn insert_secret_record(&self, record: &EncryptedSecretRecord) -> AppResult<()> {
         let mut connection = self.connection.lock().expect("database lock poisoned");
         let transaction = connection.transaction()?;
@@ -1661,12 +1777,14 @@ impl Database {
         let feeds = self.list_feeds(None, 100_000)?;
         let memories = self.list_memories(None, None, 100_000)?;
         let plans = self.list_plans(true)?;
+        let memos = self.list_memos(100_000)?;
         let export = json!({
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "exportedAt": Utc::now().to_rfc3339(),
             "feeds": feeds,
             "memories": memories,
             "plans": plans,
+            "memos": memos,
         });
         std::fs::write(path, serde_json::to_vec_pretty(&export)?)?;
         Ok(())
@@ -2017,6 +2135,16 @@ fn map_encrypted_secret(row: &rusqlite::Row<'_>) -> rusqlite::Result<EncryptedSe
     })
 }
 
+fn map_memo(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoItem> {
+    Ok(MemoItem {
+        id: row.get(0)?,
+        content: row.get(1)?,
+        source_title: row.get(2)?,
+        created_at: row.get(3)?,
+        feishu_synced_at: row.get(4)?,
+    })
+}
+
 pub(crate) fn validate_plan_proposal(
     proposal: &PlanProposal,
     scheduled_at: Option<i64>,
@@ -2173,6 +2301,26 @@ mod tests {
             needs_clarification,
             clarification_question: needs_clarification.then(|| "准备在几点验收？".to_string()),
         }
+    }
+
+    #[test]
+    fn memo_is_stored_without_creating_a_feed_or_plan() {
+        let database = Database::in_memory().unwrap();
+        let memo = database
+            .create_memo("  想做一个帮助创作者整理灵感的产品  ", "微信")
+            .unwrap();
+        assert_eq!(memo.content, "想做一个帮助创作者整理灵感的产品");
+        assert_eq!(database.list_memos(20).unwrap().len(), 1);
+        assert_eq!(database.count_pending_feishu_memos().unwrap(), 1);
+        assert!(database.list_feeds(None, 20).unwrap().is_empty());
+        assert!(database.list_plans(true).unwrap().is_empty());
+
+        database
+            .mark_memo_feishu_synced(&memo.id, memo.created_at + 1)
+            .unwrap();
+        assert_eq!(database.count_pending_feishu_memos().unwrap(), 0);
+        assert!(database.create_memo("   ", "微信").is_err());
+        assert!(database.create_memo(&"字".repeat(4_001), "微信").is_err());
     }
 
     #[test]
