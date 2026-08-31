@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 
-export type Page = "inbox" | "memories" | "memo" | "review" | "settings";
+export type Page = "inbox" | "memories" | "memo" | "secrets" | "review" | "settings";
 
 export interface FeedEvent {
   id: string;
@@ -84,6 +84,41 @@ export interface AppSettings {
   feishuTaskRemindersEnabled: boolean;
   feishuSourceEnabled: boolean;
   feishuSourceUrl: string;
+  feishuSecretEnabled: boolean;
+}
+
+export interface VaultStatus {
+  initialized: boolean;
+  unlocked: boolean;
+  secretCount: number;
+}
+
+export interface SecretItem {
+  id: string;
+  title: string;
+  secretType: string;
+  account?: string;
+  secretValue: string;
+  website?: string;
+  notes?: string;
+  sourceTitle: string;
+  createdAt: number;
+  updatedAt: number;
+  feishuSyncedAt?: number;
+}
+
+export interface SecretStashResult {
+  secretId: string;
+  message: string;
+  undoUntil: number;
+}
+
+export interface FeishuSecretStatus {
+  enabled: boolean;
+  configured: boolean;
+  spreadsheetUrl?: string;
+  pendingSecrets: number;
+  lastError?: string;
 }
 
 export interface FeishuSyncStatus {
@@ -246,6 +281,7 @@ function initialMockState(): MockState {
       feishuTaskRemindersEnabled: false,
       feishuSourceEnabled: false,
       feishuSourceUrl: "",
+      feishuSecretEnabled: false,
     },
   };
 }
@@ -483,6 +519,43 @@ export async function commitCapture(): Promise<CaptureCommitResult> {
   return invoke("commit_capture");
 }
 
+export async function getVaultStatus(): Promise<VaultStatus> {
+  if (isTauri) return invoke("get_vault_status");
+  return { initialized: false, unlocked: false, secretCount: 0 };
+}
+
+export async function initializeVault(password: string): Promise<VaultStatus> {
+  if (isTauri) return invoke("initialize_vault", { password });
+  return { initialized: true, unlocked: true, secretCount: 0 };
+}
+
+export async function unlockVault(password: string): Promise<VaultStatus> {
+  if (isTauri) return invoke("unlock_vault", { password });
+  return { initialized: true, unlocked: true, secretCount: 0 };
+}
+
+export async function lockVault(): Promise<VaultStatus> {
+  if (isTauri) return invoke("lock_vault");
+  return { initialized: true, unlocked: false, secretCount: 0 };
+}
+
+export async function listSecretItems(): Promise<SecretItem[]> {
+  if (isTauri) return invoke("list_secret_items");
+  return [];
+}
+
+export async function deleteSecretItem(secretId: string): Promise<void> {
+  if (isTauri) return invoke("delete_secret_item", { secretId });
+}
+
+export async function stashCapture(): Promise<SecretStashResult> {
+  return invoke("stash_capture");
+}
+
+export async function undoSecretStash(secretId: string): Promise<void> {
+  return invoke("undo_secret_stash", { secretId });
+}
+
 export async function resolvePlanTime(planId: string, answer: string): Promise<CaptureCommitResult> {
   return invoke("resolve_plan_time", { planId, answer });
 }
@@ -526,6 +599,20 @@ export async function getFeishuSyncStatus(): Promise<FeishuSyncStatus> {
 
 export async function syncFeishuNow(): Promise<string> {
   if (isTauri) return invoke("sync_feishu_now");
+  throw new Error("浏览器预览不会读取飞书应用凭证，请在桌面应用中同步");
+}
+
+export async function getFeishuSecretStatus(): Promise<FeishuSecretStatus> {
+  if (isTauri) return invoke("get_feishu_secret_status");
+  return {
+    enabled: false,
+    configured: false,
+    pendingSecrets: 0,
+  };
+}
+
+export async function syncFeishuSecretsNow(): Promise<string> {
+  if (isTauri) return invoke("sync_feishu_secrets_now");
   throw new Error("浏览器预览不会读取飞书应用凭证，请在桌面应用中同步");
 }
 

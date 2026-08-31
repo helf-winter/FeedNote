@@ -16,6 +16,8 @@ pub enum AppError {
     PushUnavailable(String),
     #[error("飞书同步不可用：{0}")]
     FeishuUnavailable(String),
+    #[error("秘密保险箱不可用：{0}")]
+    Vault(String),
     #[error("文件操作失败：{0}")]
     Io(#[from] std::io::Error),
     #[error("序列化失败：{0}")]

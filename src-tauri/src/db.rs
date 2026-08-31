@@ -8,9 +8,9 @@ use uuid::Uuid;
 use crate::{
     error::{AppError, AppResult},
     models::{
-        AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, FeedEvent,
-        FeishuPlanTaskMapping, FeishuSheetState, MemoryDetail, MemorySummary, MemoryVersion,
-        PlanItem, PlanProposal, ReviewItem, Stats,
+        AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, EncryptedSecretRecord,
+        FeedEvent, FeishuPlanTaskMapping, FeishuSheetState, MemoryDetail, MemorySummary,
+        MemoryVersion, PlanItem, PlanProposal, ReviewItem, Stats, VaultMeta,
     },
 };
 
@@ -174,6 +174,27 @@ impl Database {
                 task_url TEXT,
                 plan_updated_at INTEGER NOT NULL,
                 completed INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS vault_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                salt BLOB NOT NULL,
+                verifier_nonce BLOB NOT NULL,
+                verifier_ciphertext BLOB NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS secret_records (
+                id TEXT PRIMARY KEY,
+                nonce BLOB NOT NULL,
+                ciphertext BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                feishu_synced_at INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS feishu_secret_cleanup_queue (
+                secret_id TEXT PRIMARY KEY
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -1354,6 +1375,255 @@ impl Database {
         }
     }
 
+    pub fn get_vault_meta(&self) -> AppResult<Option<VaultMeta>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection
+            .query_row(
+                "SELECT salt, verifier_nonce, verifier_ciphertext FROM vault_meta WHERE id = 1",
+                [],
+                |row| {
+                    Ok(VaultMeta {
+                        salt: row.get(0)?,
+                        verifier_nonce: row.get(1)?,
+                        verifier_ciphertext: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn save_vault_meta(&self, meta: &VaultMeta) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute(
+            "INSERT INTO vault_meta
+             (id, salt, verifier_nonce, verifier_ciphertext, created_at)
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                meta.salt,
+                meta.verifier_nonce,
+                meta.verifier_ciphertext,
+                Utc::now().timestamp_millis()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_secret_records(&self) -> AppResult<i64> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        count(&connection, "SELECT COUNT(*) FROM secret_records")
+    }
+
+    pub fn insert_secret_record(&self, record: &EncryptedSecretRecord) -> AppResult<()> {
+        let mut connection = self.connection.lock().expect("database lock poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO secret_records
+             (id, nonce, ciphertext, created_at, updated_at, feishu_synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                record.id,
+                record.nonce,
+                record.ciphertext,
+                record.created_at,
+                record.updated_at,
+                record.feishu_synced_at
+            ],
+        )?;
+        insert_audit(
+            &transaction,
+            "user",
+            "secret_created",
+            "secret_record",
+            &record.id,
+            json!({ "plaintextLogged": false }),
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn update_secret_record(&self, record: &EncryptedSecretRecord) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let changed = connection.execute(
+            "UPDATE secret_records
+             SET nonce = ?2, ciphertext = ?3, updated_at = ?4, feishu_synced_at = ?5
+             WHERE id = ?1",
+            params![
+                record.id,
+                record.nonce,
+                record.ciphertext,
+                record.updated_at,
+                record.feishu_synced_at
+            ],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("秘密记录不存在".to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn get_encrypted_secret_record(&self, id: &str) -> AppResult<EncryptedSecretRecord> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection
+            .query_row(
+                "SELECT id, nonce, ciphertext, created_at, updated_at, feishu_synced_at
+                 FROM secret_records WHERE id = ?1",
+                [id],
+                map_encrypted_secret,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound("秘密记录不存在".to_string()))
+    }
+
+    pub fn list_encrypted_secret_records(&self) -> AppResult<Vec<EncryptedSecretRecord>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, nonce, ciphertext, created_at, updated_at, feishu_synced_at
+             FROM secret_records ORDER BY updated_at DESC",
+        )?;
+        let rows = statement.query_map([], map_encrypted_secret)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn delete_secret_record(&self, id: &str) -> AppResult<()> {
+        let mut connection = self.connection.lock().expect("database lock poisoned");
+        let transaction = connection.transaction()?;
+        let synced: Option<i64> = transaction
+            .query_row(
+                "SELECT feishu_synced_at FROM secret_records WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if synced.is_some() {
+            transaction.execute(
+                "INSERT OR IGNORE INTO feishu_secret_cleanup_queue (secret_id) VALUES (?1)",
+                [id],
+            )?;
+        }
+        let changed = transaction.execute("DELETE FROM secret_records WHERE id = ?1", [id])?;
+        if changed == 0 {
+            return Err(AppError::NotFound("秘密记录不存在".to_string()));
+        }
+        insert_audit(
+            &transaction,
+            "user",
+            "secret_deleted",
+            "secret_record",
+            id,
+            json!({ "plaintextLogged": false }),
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_secret_feishu_synced(&self, id: &str, synced_at: i64) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute(
+            "UPDATE secret_records SET feishu_synced_at = ?2 WHERE id = ?1",
+            params![id, synced_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_pending_feishu_secrets(&self) -> AppResult<i64> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let pending = count(
+            &connection,
+            "SELECT COUNT(*) FROM secret_records
+             WHERE feishu_synced_at IS NULL OR feishu_synced_at < updated_at",
+        )?;
+        let cleanup = count(
+            &connection,
+            "SELECT COUNT(*) FROM feishu_secret_cleanup_queue",
+        )?;
+        Ok(pending + cleanup)
+    }
+
+    pub fn list_feishu_secret_cleanup(&self) -> AppResult<Vec<String>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut statement =
+            connection.prepare("SELECT secret_id FROM feishu_secret_cleanup_queue")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn complete_feishu_secret_cleanup(&self, ids: &[String]) -> AppResult<()> {
+        let mut connection = self.connection.lock().expect("database lock poisoned");
+        let transaction = connection.transaction()?;
+        for id in ids {
+            transaction.execute(
+                "DELETE FROM feishu_secret_cleanup_queue WHERE secret_id = ?1",
+                [id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn get_feishu_secret_sheet_state(&self) -> AppResult<Option<FeishuSheetState>> {
+        self.get_json_setting("feishu_secret_sheet")
+    }
+
+    pub fn save_feishu_secret_sheet_state(&self, state: &FeishuSheetState) -> AppResult<()> {
+        self.save_json_setting("feishu_secret_sheet", state)?;
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute("UPDATE secret_records SET feishu_synced_at = NULL", [])?;
+        Ok(())
+    }
+
+    pub fn get_feishu_secret_sync_error(&self) -> AppResult<Option<String>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'feishu_secret_sync_error'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn save_feishu_secret_sync_error(&self, error: Option<&str>) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        if let Some(error) = error {
+            connection.execute(
+                "INSERT INTO settings (key, value) VALUES ('feishu_secret_sync_error', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [error],
+            )?;
+        } else {
+            connection.execute(
+                "DELETE FROM settings WHERE key = 'feishu_secret_sync_error'",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn get_json_setting<T: serde::de::DeserializeOwned>(&self, key: &str) -> AppResult<Option<T>> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let value: Option<String> = connection
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(AppError::from))
+            .transpose()
+    }
+
+    fn save_json_setting<T: serde::Serialize>(&self, key: &str, value: &T) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, serde_json::to_string(value)?],
+        )?;
+        Ok(())
+    }
+
     pub fn update_settings(&self, settings: &AppSettings) -> AppResult<()> {
         validate_llm_endpoint(&settings.llm_endpoint)?;
         validate_embedding_endpoint(&settings.embedding_endpoint)?;
@@ -1733,6 +2003,17 @@ fn map_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanItem> {
         updated_at: row.get(12)?,
         reminded_at: row.get(13)?,
         feishu_synced_at: row.get(14)?,
+    })
+}
+
+fn map_encrypted_secret(row: &rusqlite::Row<'_>) -> rusqlite::Result<EncryptedSecretRecord> {
+    Ok(EncryptedSecretRecord {
+        id: row.get(0)?,
+        nonce: row.get(1)?,
+        ciphertext: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+        feishu_synced_at: row.get(5)?,
     })
 }
 

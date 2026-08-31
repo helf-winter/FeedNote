@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
   BrainCircuit,
@@ -8,12 +9,16 @@ import {
   CircleAlert,
   Clock3,
   Cloud,
+  Copy,
   Database,
   Download,
+  Eye,
+  EyeOff,
   ExternalLink,
   FileText,
   Inbox,
   LoaderCircle,
+  LockKeyhole,
   Menu,
   NotebookPen,
   Plus,
@@ -26,6 +31,7 @@ import {
   Sparkles,
   Table2,
   Trash2,
+  UnlockKeyhole,
   X,
 } from "lucide-vue-next";
 import {
@@ -34,31 +40,42 @@ import {
   deleteFeed,
   exportArchive,
   getFeishuSourceStatus,
+  getFeishuSecretStatus,
   getFeishuSyncStatus,
   getMemory,
   getSettings,
   getStats,
+  getVaultStatus,
   isTauri,
   listFeeds,
   listMemories,
   listReviews,
+  listSecretItems,
+  lockVault,
   processFeed,
   requestDeleteFeed,
   resolveReview,
+  deleteSecretItem,
+  initializeVault,
   openExternalLink,
   syncFeishuNow,
+  syncFeishuSecretsNow,
   syncFeishuSourceNow,
   testMobilePush,
   updateSettings,
+  unlockVault,
   type AppSettings,
   type FeedEvent,
   type FeishuSourceStatus,
+  type FeishuSecretStatus,
   type FeishuSyncStatus,
   type MemoryDetail,
   type MemorySummary,
   type Page,
   type ReviewItem,
   type Stats,
+  type SecretItem,
+  type VaultStatus,
 } from "./api";
 
 const activePage = ref<Page>("inbox");
@@ -86,6 +103,7 @@ const settings = ref<AppSettings>({
   feishuTaskRemindersEnabled: false,
   feishuSourceEnabled: false,
   feishuSourceUrl: "",
+  feishuSecretEnabled: false,
 });
 const selectedMemory = ref<MemoryDetail>();
 const deleteTarget = ref<FeedEvent>();
@@ -107,6 +125,13 @@ const feishuStatus = ref<FeishuSyncStatus>({
   pendingTaskReminders: 0,
   lastError: undefined,
 });
+const feishuSecretState = ref<"idle" | "syncing" | "success" | "error">("idle");
+const feishuSecretMessage = ref("");
+const feishuSecretStatus = ref<FeishuSecretStatus>({
+  enabled: false,
+  configured: false,
+  pendingSecrets: 0,
+});
 const feishuSourceState = ref<"idle" | "syncing" | "success" | "error">("idle");
 const feishuSourceMessage = ref("");
 const feishuSourceStatus = ref<FeishuSourceStatus>({
@@ -118,11 +143,28 @@ const feishuSourceStatus = ref<FeishuSourceStatus>({
   trackedRows: 0,
   importedPlans: 0,
 });
+const vaultStatus = ref<VaultStatus>({ initialized: false, unlocked: false, secretCount: 0 });
+const secretItems = ref<SecretItem[]>([]);
+const secretSearch = ref("");
+const vaultPassword = ref("");
+const vaultPasswordConfirm = ref("");
+const vaultBusy = ref(false);
+const revealedSecrets = ref(new Set<string>());
+const filteredSecrets = computed(() => {
+  const query = secretSearch.value.trim().toLowerCase();
+  if (!query) return secretItems.value;
+  return secretItems.value.filter((secret) =>
+    [secret.title, secret.secretType, secret.account, secret.website, secret.notes]
+      .filter(Boolean)
+      .some((value) => value!.toLowerCase().includes(query)),
+  );
+});
 
 const pageTitles: Record<Page, { title: string; subtitle: string }> = {
   inbox: { title: "收集箱", subtitle: "原样保存每一次输入，再慢慢理解" },
   memories: { title: "记忆", subtitle: "当前理解，以及它从哪里来" },
   memo: { title: "备忘录", subtitle: "留给更长远的事情" },
+  secrets: { title: "秘密备忘录", subtitle: "本地加密保存，仅在解锁后显示" },
   review: { title: "待澄清", subtitle: "只有无法可靠理解的内容才会停在这里" },
   settings: { title: "设置", subtitle: "模型、数据和隐私边界" },
 };
@@ -131,6 +173,7 @@ const navItems = [
   { id: "inbox" as const, label: "收集箱", icon: Inbox },
   { id: "memories" as const, label: "记忆", icon: BrainCircuit },
   { id: "memo" as const, label: "备忘录", icon: NotebookPen },
+  { id: "secrets" as const, label: "秘密备忘录", icon: LockKeyhole },
   { id: "review" as const, label: "待澄清", icon: CircleAlert },
   { id: "settings" as const, label: "设置", icon: Settings },
 ];
@@ -148,11 +191,23 @@ const memoryTypes = [
 ];
 
 const canSubmit = computed(() => composer.value.trim().length > 0 && !saving.value);
+let stopVaultListener: (() => void) | undefined;
 
 onMounted(async () => {
   await refreshAll();
   await refreshFeishuStatus();
   await refreshFeishuSourceStatus();
+  await refreshVaultStatus();
+  await refreshFeishuSecretStatus();
+  if (isTauri) {
+    stopVaultListener = await listen("vault-changed", () => {
+      void refreshVaultStatus();
+      void refreshFeishuSecretStatus();
+      if (activePage.value === "secrets" && vaultStatus.value.unlocked) {
+        void refreshSecretVault();
+      }
+    });
+  }
   window.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
@@ -166,6 +221,8 @@ onMounted(async () => {
     }
   });
 });
+
+onBeforeUnmount(() => stopVaultListener?.());
 
 async function refreshAll(): Promise<void> {
   loading.value = true;
@@ -331,6 +388,39 @@ async function openFeishuSheet(): Promise<void> {
   await openExternalLink(feishuStatus.value.spreadsheetUrl);
 }
 
+async function refreshFeishuSecretStatus(): Promise<void> {
+  try {
+    feishuSecretStatus.value = await getFeishuSecretStatus();
+  } catch {
+    feishuSecretStatus.value = {
+      enabled: settings.value.feishuSecretEnabled,
+      configured: false,
+      pendingSecrets: 0,
+    };
+  }
+}
+
+async function runFeishuSecretSync(): Promise<void> {
+  if (feishuSecretState.value === "syncing") return;
+  feishuSecretState.value = "syncing";
+  feishuSecretMessage.value = "正在单向同步秘密记录...";
+  try {
+    await updateSettings(settings.value);
+    feishuSecretMessage.value = await syncFeishuSecretsNow();
+    feishuSecretState.value = "success";
+    await Promise.all([refreshFeishuSecretStatus(), refreshSecretVault()]);
+  } catch (error) {
+    feishuSecretMessage.value = errorMessage(error);
+    feishuSecretState.value = "error";
+    await refreshFeishuSecretStatus();
+  }
+}
+
+async function openFeishuSecretSheet(): Promise<void> {
+  if (!feishuSecretStatus.value.spreadsheetUrl) return;
+  await openExternalLink(feishuSecretStatus.value.spreadsheetUrl);
+}
+
 async function refreshFeishuSourceStatus(): Promise<void> {
   try {
     feishuSourceStatus.value = await getFeishuSourceStatus();
@@ -380,6 +470,88 @@ function navigate(page: Page): void {
   activePage.value = page;
   sidebarOpen.value = false;
   if (page === "inbox") nextTick(() => composerElement.value?.focus());
+  if (page === "secrets") void refreshSecretVault();
+}
+
+async function refreshVaultStatus(): Promise<void> {
+  try {
+    vaultStatus.value = await getVaultStatus();
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  }
+}
+
+async function refreshSecretVault(): Promise<void> {
+  await refreshVaultStatus();
+  if (!vaultStatus.value.unlocked) {
+    secretItems.value = [];
+    revealedSecrets.value = new Set();
+    return;
+  }
+  try {
+    secretItems.value = await listSecretItems();
+    vaultStatus.value.secretCount = secretItems.value.length;
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  }
+}
+
+async function initializeSecretVault(): Promise<void> {
+  if (vaultPassword.value !== vaultPasswordConfirm.value) {
+    notify("两次主密码不一致", "error");
+    return;
+  }
+  await authenticateSecretVault(true);
+}
+
+async function authenticateSecretVault(initializing = false): Promise<void> {
+  if (vaultBusy.value || vaultPassword.value.length < 12) return;
+  vaultBusy.value = true;
+  try {
+    vaultStatus.value = initializing
+      ? await initializeVault(vaultPassword.value)
+      : await unlockVault(vaultPassword.value);
+    vaultPassword.value = "";
+    vaultPasswordConfirm.value = "";
+    await refreshSecretVault();
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  } finally {
+    vaultBusy.value = false;
+  }
+}
+
+async function lockSecretVault(): Promise<void> {
+  vaultStatus.value = await lockVault();
+  secretItems.value = [];
+  revealedSecrets.value = new Set();
+}
+
+function toggleSecretReveal(secretId: string): void {
+  const next = new Set(revealedSecrets.value);
+  if (next.has(secretId)) next.delete(secretId);
+  else next.add(secretId);
+  revealedSecrets.value = next;
+}
+
+async function copySecretValue(secret: SecretItem): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(secret.secretValue);
+    notify("秘密值已复制", "success");
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  }
+}
+
+async function removeSecret(secret: SecretItem): Promise<void> {
+  if (!window.confirm(`永久删除“${secret.title}”？`)) return;
+  try {
+    await deleteSecretItem(secret.id);
+    await refreshSecretVault();
+    notify("秘密记录已删除", "success");
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  }
 }
 
 function notify(message: string, kind: "success" | "error"): void {
@@ -612,6 +784,71 @@ function typeLabel(type: string): string {
         </div>
       </section>
 
+      <section v-else-if="activePage === 'secrets'" class="page secrets-page">
+        <form v-if="!vaultStatus.initialized" class="vault-gate" @submit.prevent="initializeSecretVault">
+          <span class="vault-gate-icon"><LockKeyhole :size="24" /></span>
+          <h2>设置秘密备忘录主密码</h2>
+          <p>主密码不会上传，也没有找回通道。</p>
+          <input v-model="vaultPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="至少 12 个字符" />
+          <input v-model="vaultPasswordConfirm" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="再次输入主密码" />
+          <button class="primary-button" type="submit" :disabled="vaultBusy || vaultPassword.length < 12 || !vaultPasswordConfirm">
+            <LoaderCircle v-if="vaultBusy" class="spin" :size="16" />
+            <LockKeyhole v-else :size="16" />创建保险箱
+          </button>
+        </form>
+
+        <form v-else-if="!vaultStatus.unlocked" class="vault-gate" @submit.prevent="authenticateSecretVault(false)">
+          <span class="vault-gate-icon"><LockKeyhole :size="24" /></span>
+          <h2>秘密备忘录已锁定</h2>
+          <input v-model="vaultPassword" type="password" maxlength="256" autocomplete="current-password" autofocus placeholder="输入主密码" />
+          <button class="primary-button" type="submit" :disabled="vaultBusy || !vaultPassword">
+            <LoaderCircle v-if="vaultBusy" class="spin" :size="16" />
+            <UnlockKeyhole v-else :size="16" />解锁
+          </button>
+        </form>
+
+        <template v-else>
+          <div class="secrets-toolbar">
+            <label class="search-control">
+              <Search :size="17" />
+              <input v-model="secretSearch" type="search" placeholder="搜索名称、类型、账号或网站" />
+            </label>
+            <span>{{ secretItems.length }} 条</span>
+            <button class="secondary-button" type="button" @click="lockSecretVault"><LockKeyhole :size="16" />锁定</button>
+          </div>
+
+          <div v-if="filteredSecrets.length === 0" class="empty-state">
+            <LockKeyhole :size="28" />
+            <strong>没有匹配的秘密</strong>
+          </div>
+          <div v-else class="secret-list">
+            <article v-for="secret in filteredSecrets" :key="secret.id" class="secret-card">
+              <div class="secret-card-head">
+                <div>
+                  <span class="secret-type">{{ secret.secretType }}</span>
+                  <h2>{{ secret.title }}</h2>
+                </div>
+                <div class="secret-actions">
+                  <button class="icon-button" type="button" :title="revealedSecrets.has(secret.id) ? '隐藏' : '显示'" :aria-label="revealedSecrets.has(secret.id) ? '隐藏秘密' : '显示秘密'" @click="toggleSecretReveal(secret.id)">
+                    <EyeOff v-if="revealedSecrets.has(secret.id)" :size="17" />
+                    <Eye v-else :size="17" />
+                  </button>
+                  <button class="icon-button" type="button" title="复制" aria-label="复制秘密" @click="copySecretValue(secret)"><Copy :size="16" /></button>
+                  <button class="icon-button danger" type="button" title="删除" aria-label="删除秘密" @click="removeSecret(secret)"><Trash2 :size="16" /></button>
+                </div>
+              </div>
+              <code class="secret-value" :class="{ revealed: revealedSecrets.has(secret.id) }">{{ revealedSecrets.has(secret.id) ? secret.secretValue : '••••••••••••••••' }}</code>
+              <dl class="secret-meta">
+                <template v-if="secret.account"><dt>账号</dt><dd>{{ secret.account }}</dd></template>
+                <template v-if="secret.website"><dt>网站</dt><dd><button type="button" @click="openExternalLink(secret.website!)">{{ secret.website }}</button></dd></template>
+                <template v-if="secret.notes"><dt>备注</dt><dd>{{ secret.notes }}</dd></template>
+                <dt>更新</dt><dd>{{ formatTime(secret.updatedAt) }}<span v-if="secret.feishuSyncedAt" class="secret-sync-mark">已同步</span></dd>
+              </dl>
+            </article>
+          </div>
+        </template>
+      </section>
+
       <section v-else-if="activePage === 'review'" class="page review-page">
         <div class="boundary-banner">
           <ShieldCheck :size="21" />
@@ -783,6 +1020,35 @@ function typeLabel(type: string): string {
           <p v-if="feishuStatus.taskReminderError" class="connection-result error">{{ feishuStatus.taskReminderError }}</p>
         </div>
 
+        <div class="settings-section secret-sync-section">
+          <div class="settings-heading">
+            <div><h2>飞书秘密表</h2><p>把已藏内容单向写入独立表格，便于在手机上查看。</p></div>
+            <label class="toggle-control">
+              <input v-model="settings.feishuSecretEnabled" type="checkbox" />
+              <span aria-hidden="true" />
+              <strong>{{ settings.feishuSecretEnabled ? "已开启" : "已关闭" }}</strong>
+            </label>
+          </div>
+          <p class="security-warning"><CircleAlert :size="17" />开启后，秘密值会以明文写入飞书。飞书访问权限不是本地加密，也不提供端到端保密保证。</p>
+          <div class="form-grid" :class="{ muted: !settings.feishuSecretEnabled }">
+            <label><span>同步方向</span><input value="FeedNote → 飞书（单向）" type="text" readonly /></label>
+            <label><span>本地保险箱</span><input :value="vaultStatus.unlocked ? '已解锁' : '需先解锁'" type="text" readonly /></label>
+            <label><span>同步队列</span><input :value="`${feishuSecretStatus.pendingSecrets} 条待同步`" type="text" readonly /></label>
+          </div>
+          <div class="settings-actions">
+            <button class="secondary-button" type="button" :disabled="!settings.feishuSecretEnabled || !vaultStatus.unlocked || feishuSecretState === 'syncing'" @click="runFeishuSecretSync">
+              <LoaderCircle v-if="feishuSecretState === 'syncing'" class="spin" :size="16" />
+              <Cloud v-else :size="16" />初始化并同步
+            </button>
+            <button v-if="feishuSecretStatus.spreadsheetUrl" class="secondary-button" type="button" @click="openFeishuSecretSheet">
+              <Table2 :size="16" />打开秘密表<ExternalLink :size="14" />
+            </button>
+            <button class="primary-button" type="button" @click="saveSettings"><Check :size="16" />保存设置</button>
+          </div>
+          <p v-if="feishuSecretMessage" class="connection-result" :class="feishuSecretState">{{ feishuSecretMessage }}</p>
+          <p v-else-if="feishuSecretStatus.lastError" class="connection-result error">{{ feishuSecretStatus.lastError }}</p>
+        </div>
+
         <div class="settings-section">
           <div class="settings-heading">
             <div><h2>数据导出</h2><p>导出原始投喂和当前记忆为带版本号的 JSON。</p></div>
@@ -798,10 +1064,13 @@ function typeLabel(type: string): string {
             <li>投递表只在选区被高置信识别为求职记录时写入，不会反向扫描生成计划。</li>
             <li>模型输出必须经过 Memory Engine 校验后才能自动写入。</li>
             <li>仅将当前输入和必要的候选记忆发送至你授权的模型服务。</li>
-            <li>密钥只从 data\\secrets.env 读取，不进入数据库、前端或导出文件。</li>
+            <li>模型与飞书服务凭证只从 data\\secrets.env 读取，不进入数据库、前端或导出文件。</li>
             <li>不监听剪贴板、键盘，也不扫描用户目录。</li>
+            <li><LockKeyhole :size="14" />“藏”的原文先在本地加密，绝不发送给 LLM；模型只接收已替换为 [SECRET] 的周边文本来补充名称、账号等元数据。</li>
+            <li><LockKeyhole :size="14" />秘密不进入普通投喂、记忆、计划、全文索引或常规 JSON 导出；主密码独立保存且无法找回。</li>
             <li><Smartphone :size="14" />手机推送默认关闭，只发送计划卡片字段，不发送原文和周边上下文。</li>
-            <li><Cloud :size="14" />两个飞书通道独立开关；计划表只回读已有计划的完成状态，投递表绝不反向生成计划。</li>
+            <li><Cloud :size="14" />三个飞书通道独立开关；计划表只回读已有计划的完成状态，投递表绝不反向生成计划。</li>
+            <li><CircleAlert :size="14" />秘密表只做 FeedNote 到飞书的单向写入；启用后秘密值在飞书中是明文，安全边界由飞书账号和文档权限承担。</li>
             <li><Clock3 :size="14" />飞书待办只双向同步已有任务的完成状态，并固定提前 3 小时提醒。</li>
           </ul>
         </div>

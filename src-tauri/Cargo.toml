@@ -13,7 +13,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+aes-gcm = "0.10"
+argon2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +27,7 @@ tauri-plugin-global-shortcut = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com",

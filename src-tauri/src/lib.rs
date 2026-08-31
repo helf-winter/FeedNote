@@ -6,6 +6,7 @@ mod feishu_sync;
 mod mobile_push;
 mod models;
 mod secrets;
+mod vault;
 mod windows_selection;
 
 use std::{
@@ -29,6 +30,7 @@ pub struct AppState {
     selection_suppressed: Arc<AtomicBool>,
     dock_expanded: AtomicBool,
     feishu_syncing: Arc<AtomicBool>,
+    vault: Arc<vault::Vault>,
 }
 
 pub struct PendingCapture {
@@ -63,6 +65,7 @@ pub fn run() {
                 selection_suppressed: selection_suppressed.clone(),
                 dock_expanded: AtomicBool::new(false),
                 feishu_syncing: Arc::new(AtomicBool::new(false)),
+                vault: Arc::new(vault::Vault::new()),
             });
 
             WebviewWindowBuilder::new(
@@ -88,7 +91,7 @@ pub fn run() {
                 WebviewUrl::App("index.html?surface=capture-menu".into()),
             )
             .title("FeedNote selection")
-            .inner_size(300.0, 180.0)
+            .inner_size(300.0, 238.0)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -131,6 +134,7 @@ pub fn run() {
                 state.secrets_path.clone(),
                 state.feishu_syncing.clone(),
                 app.handle().clone(),
+                state.vault.clone(),
             );
             let open_item = MenuItem::with_id(app, "open", "打开 FeedNote", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -172,6 +176,14 @@ pub fn run() {
             commands::prepare_capture,
             commands::discard_capture,
             commands::get_capture_preview,
+            commands::get_vault_status,
+            commands::initialize_vault,
+            commands::unlock_vault,
+            commands::lock_vault,
+            commands::list_secret_items,
+            commands::delete_secret_item,
+            commands::stash_capture,
+            commands::undo_secret_stash,
             commands::commit_capture,
             commands::resolve_plan_time,
             commands::list_plans,
@@ -182,6 +194,8 @@ pub fn run() {
             commands::test_mobile_push,
             commands::get_feishu_sync_status,
             commands::sync_feishu_now,
+            commands::get_feishu_secret_status,
+            commands::sync_feishu_secrets_now,
             commands::get_feishu_source_status,
             commands::sync_feishu_source_now,
             commands::export_data,

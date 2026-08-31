@@ -87,6 +87,7 @@ pub struct AppSettings {
     pub feishu_task_reminders_enabled: bool,
     pub feishu_source_enabled: bool,
     pub feishu_source_url: String,
+    pub feishu_secret_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -105,6 +106,7 @@ impl Default for AppSettings {
             feishu_task_reminders_enabled: false,
             feishu_source_enabled: false,
             feishu_source_url: String::new(),
+            feishu_secret_enabled: false,
         }
     }
 }
@@ -154,6 +156,83 @@ pub struct UpdateSettingsInput {
     pub feishu_task_reminders_enabled: bool,
     pub feishu_source_enabled: bool,
     pub feishu_source_url: String,
+    pub feishu_secret_enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretPayload {
+    pub title: String,
+    pub secret_type: String,
+    pub account: Option<String>,
+    pub secret_value: String,
+    pub website: Option<String>,
+    pub notes: Option<String>,
+    pub source_title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretItem {
+    pub id: String,
+    #[serde(flatten)]
+    pub payload: SecretPayload,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub feishu_synced_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretMetadataProposal {
+    pub title: String,
+    pub secret_type: String,
+    pub account: Option<String>,
+    pub website: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultStatus {
+    pub initialized: bool,
+    pub unlocked: bool,
+    pub secret_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretStashResult {
+    pub secret_id: String,
+    pub message: String,
+    pub undo_until: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuSecretStatus {
+    pub enabled: bool,
+    pub configured: bool,
+    pub spreadsheet_url: Option<String>,
+    pub pending_secrets: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VaultMeta {
+    pub salt: Vec<u8>,
+    pub verifier_nonce: Vec<u8>,
+    pub verifier_ciphertext: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EncryptedSecretRecord {
+    pub id: String,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub feishu_synced_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

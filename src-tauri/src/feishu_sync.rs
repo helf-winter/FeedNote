@@ -17,14 +17,17 @@ use crate::{
     db::Database,
     error::{AppError, AppResult},
     models::{
-        ApplicationRecordProposal, ApplicationWriteResult, FeishuPlanTaskMapping, FeishuSheetState,
-        FeishuSourceStatus, FeishuSyncStatus, PlanItem,
+        ApplicationRecordProposal, ApplicationWriteResult, FeishuPlanTaskMapping,
+        FeishuSecretStatus, FeishuSheetState, FeishuSourceStatus, FeishuSyncStatus, PlanItem,
+        SecretItem,
     },
     secrets::parse_env,
+    vault::Vault,
 };
 
 const API_BASE: &str = "https://open.feishu.cn/open-apis";
 const SHEET_TITLE: &str = "FeedNote 计划";
+const SECRET_SHEET_TITLE: &str = "FeedNote 秘密";
 const TASK_REMINDER_MINUTES: i64 = 180;
 const HEADERS: [&str; 9] = [
     "本地计划ID",
@@ -38,6 +41,16 @@ const HEADERS: [&str; 9] = [
     "更新时间",
 ];
 const TASK_UPDATE_FIELDS: [&str; 5] = ["summary", "description", "start", "due", "completed_at"];
+const SECRET_HEADERS: [&str; 8] = [
+    "本地秘密ID",
+    "类型",
+    "名称",
+    "账号",
+    "秘密值（明文）",
+    "网站",
+    "备注",
+    "更新时间",
+];
 
 struct CachedTenantToken {
     app_id: String,
@@ -98,6 +111,7 @@ pub fn start_scheduler(
     secrets_path: std::path::PathBuf,
     syncing: Arc<AtomicBool>,
     app: AppHandle,
+    vault: Arc<Vault>,
 ) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -112,6 +126,7 @@ pub fn start_scheduler(
                 .is_ok_and(|plan_ids| !plan_ids.is_empty());
             if settings.feishu_sync_enabled
                 || settings.feishu_task_reminders_enabled
+                || settings.feishu_secret_enabled
                 || cleanup_pending
             {
                 if let Some(_guard) = SyncGuard::acquire(&syncing) {
@@ -140,6 +155,19 @@ pub fn start_scheduler(
                             }
                         }
                     }
+                    if settings.feishu_secret_enabled
+                        && vault.status(&database).is_ok_and(|status| status.unlocked)
+                    {
+                        match sync_secret_pending(&database, &secrets_path, &vault).await {
+                            Ok(_) => {
+                                let _ = database.save_feishu_secret_sync_error(None);
+                            }
+                            Err(error) => {
+                                let _ = database
+                                    .save_feishu_secret_sync_error(Some(&error.to_string()));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -158,6 +186,46 @@ pub fn status(database: &Database, secrets_path: &Path) -> AppResult<FeishuSyncS
         task_reminders_enabled: settings.feishu_task_reminders_enabled,
         pending_task_reminders: database.count_pending_feishu_plan_tasks()?,
         task_reminder_error: database.get_feishu_task_sync_error()?,
+    })
+}
+
+pub fn secret_status(database: &Database, secrets_path: &Path) -> AppResult<FeishuSecretStatus> {
+    let settings = database.get_settings()?;
+    let state = database.get_feishu_secret_sheet_state()?;
+    Ok(FeishuSecretStatus {
+        enabled: settings.feishu_secret_enabled,
+        configured: FeishuSecrets::is_configured(secrets_path),
+        spreadsheet_url: state.map(|state| state.spreadsheet_url),
+        pending_secrets: database.count_pending_feishu_secrets()?,
+        last_error: database.get_feishu_secret_sync_error()?,
+    })
+}
+
+pub async fn sync_secrets_now(
+    database: &Database,
+    secrets_path: &Path,
+    syncing: &AtomicBool,
+    vault: &Vault,
+) -> AppResult<String> {
+    let _guard = SyncGuard::acquire(syncing)
+        .ok_or_else(|| AppError::FeishuUnavailable("同步正在进行，请稍后查看状态".to_string()))?;
+    if !database.get_settings()?.feishu_secret_enabled {
+        return Err(AppError::Validation("飞书秘密表同步尚未开启".to_string()));
+    }
+    let synced = match sync_secret_pending(database, secrets_path, vault).await {
+        Ok(synced) => {
+            database.save_feishu_secret_sync_error(None)?;
+            synced
+        }
+        Err(error) => {
+            database.save_feishu_secret_sync_error(Some(&error.to_string()))?;
+            return Err(error);
+        }
+    };
+    Ok(if synced == 0 {
+        "飞书秘密表已同步".to_string()
+    } else {
+        format!("已同步 {synced} 条秘密记录到飞书明文表")
     })
 }
 
@@ -1158,6 +1226,205 @@ async fn sync_pending(
     Ok(pulled + pending.len())
 }
 
+async fn sync_secret_pending(
+    database: &Database,
+    secrets_path: &Path,
+    vault: &Vault,
+) -> AppResult<usize> {
+    let secrets = FeishuSecrets::load(secrets_path)?;
+    let client = client()?;
+    let token = tenant_access_token(&client, &secrets).await?;
+    let state = match database.get_feishu_secret_sheet_state()? {
+        Some(state) => state,
+        None => create_secret_sheet(database, &client, &token).await?,
+    };
+    let rows = read_secret_rows(&client, &token, &state).await?;
+    if rows.is_empty() {
+        write_values(
+            &client,
+            &token,
+            &state,
+            "A1:H1",
+            vec![SECRET_HEADERS.iter().map(|value| json!(value)).collect()],
+        )
+        .await?;
+    }
+
+    let cleanup = database.list_feishu_secret_cleanup()?;
+    for id in &cleanup {
+        if let Some(row_number) = rows.get(id) {
+            write_values(
+                &client,
+                &token,
+                &state,
+                &format!("A{row_number}:H{row_number}"),
+                vec![vec![json!(""); SECRET_HEADERS.len()]],
+            )
+            .await?;
+        }
+    }
+    database.complete_feishu_secret_cleanup(&cleanup)?;
+
+    let items = vault.list(database)?;
+    let pending: Vec<&SecretItem> = items
+        .iter()
+        .filter(|item| {
+            item.feishu_synced_at
+                .is_none_or(|synced_at| synced_at < item.updated_at)
+        })
+        .collect();
+    for item in &pending {
+        let row = secret_row(item);
+        if let Some(row_number) = rows.get(&item.id) {
+            write_values(
+                &client,
+                &token,
+                &state,
+                &format!("A{row_number}:H{row_number}"),
+                vec![row],
+            )
+            .await?;
+        } else {
+            append_secret_values(&client, &token, &state, vec![row]).await?;
+        }
+    }
+
+    let verified_rows = read_secret_rows(&client, &token, &state).await?;
+    let missing = pending
+        .iter()
+        .filter(|item| !verified_rows.contains_key(&item.id))
+        .count();
+    if missing > 0 {
+        return Err(AppError::FeishuUnavailable(format!(
+            "秘密表回读未找到 {missing} 条记录，本地仍保留为待同步"
+        )));
+    }
+    let synced_at = Utc::now().timestamp_millis();
+    for item in &pending {
+        database.mark_secret_feishu_synced(&item.id, synced_at)?;
+    }
+    Ok(cleanup.len() + pending.len())
+}
+
+async fn create_secret_sheet(
+    database: &Database,
+    client: &Client,
+    token: &str,
+) -> AppResult<FeishuSheetState> {
+    let response = client
+        .post(format!("{API_BASE}/sheets/v3/spreadsheets"))
+        .bearer_auth(token)
+        .json(&json!({ "title": SECRET_SHEET_TITLE }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let spreadsheet = &payload["data"]["spreadsheet"];
+    let spreadsheet_token = string_field(spreadsheet, "spreadsheet_token")?;
+    let spreadsheet_url = spreadsheet["url"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("https://feishu.cn/sheets/{spreadsheet_token}"));
+    let response = client
+        .get(format!(
+            "{API_BASE}/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let sheet_id = payload["data"]["sheets"]
+        .as_array()
+        .and_then(|sheets| sheets.first())
+        .and_then(|sheet| sheet["sheet_id"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::FeishuUnavailable("新秘密表没有工作表".to_string()))?;
+    let state = FeishuSheetState {
+        spreadsheet_token,
+        sheet_id,
+        spreadsheet_url,
+    };
+    database.save_feishu_secret_sheet_state(&state)?;
+    Ok(state)
+}
+
+async fn read_secret_rows(
+    client: &Client,
+    token: &str,
+    state: &FeishuSheetState,
+) -> AppResult<HashMap<String, usize>> {
+    let range = format!("{}!A:A", state.sheet_id);
+    let mut url = Url::parse(&format!(
+        "{API_BASE}/sheets/v2/spreadsheets/{}/values/",
+        state.spreadsheet_token
+    ))
+    .map_err(|_| AppError::FeishuUnavailable("飞书秘密表读取地址无效".to_string()))?;
+    url.path_segments_mut()
+        .map_err(|_| AppError::FeishuUnavailable("飞书秘密表读取地址无效".to_string()))?
+        .pop_if_empty()
+        .push(&range);
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let values = payload["data"]["valueRange"]["values"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Ok(values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let id = row.as_array()?.first().map(cell_text)?;
+            (!id.is_empty() && id != SECRET_HEADERS[0]).then_some((id, index + 1))
+        })
+        .collect())
+}
+
+async fn append_secret_values(
+    client: &Client,
+    token: &str,
+    state: &FeishuSheetState,
+    values: Vec<Vec<Value>>,
+) -> AppResult<()> {
+    let response = client
+        .post(format!(
+            "{API_BASE}/sheets/v2/spreadsheets/{}/values_append?insertDataOption=INSERT_ROWS",
+            state.spreadsheet_token
+        ))
+        .bearer_auth(token)
+        .json(&json!({
+            "valueRange": {
+                "range": format!("{}!A:H", state.sheet_id),
+                "values": values,
+            }
+        }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    checked_json(response).await.map(|_| ())
+}
+
+fn secret_row(item: &SecretItem) -> Vec<Value> {
+    [
+        item.id.clone(),
+        item.payload.secret_type.clone(),
+        item.payload.title.clone(),
+        item.payload.account.clone().unwrap_or_default(),
+        item.payload.secret_value.clone(),
+        item.payload.website.clone().unwrap_or_default(),
+        item.payload.notes.clone().unwrap_or_default(),
+        format_time(item.updated_at),
+    ]
+    .into_iter()
+    .map(|value| json!(safe_cell(&value)))
+    .collect()
+}
+
 fn pull_plan_sheet_statuses(
     database: &Database,
     rows: &HashMap<String, PlanSheetRow>,
@@ -1561,6 +1828,30 @@ mod tests {
         assert_eq!(HEADERS.len(), 9);
         assert!(!HEADERS.contains(&"原始投喂"));
         assert!(!HEADERS.contains(&"周边上下文"));
+    }
+
+    #[test]
+    fn secret_rows_use_the_explicit_plaintext_schema_and_neutralize_formulas() {
+        let item = SecretItem {
+            id: "secret-id".to_string(),
+            payload: crate::models::SecretPayload {
+                title: "=危险标题".to_string(),
+                secret_type: "API Key".to_string(),
+                account: Some("demo@example.com".to_string()),
+                secret_value: "+secret-value".to_string(),
+                website: Some("https://example.com/".to_string()),
+                notes: Some("仅用于测试".to_string()),
+                source_title: "控制台".to_string(),
+            },
+            created_at: 1_788_142_920_000,
+            updated_at: 1_788_142_920_000,
+            feishu_synced_at: None,
+        };
+        let row = secret_row(&item);
+        assert_eq!(SECRET_HEADERS.len(), 8);
+        assert_eq!(row[2], json!("'=危险标题"));
+        assert_eq!(row[4], json!("'+secret-value"));
+        assert!(!SECRET_HEADERS.contains(&"周边上下文"));
     }
 
     #[test]

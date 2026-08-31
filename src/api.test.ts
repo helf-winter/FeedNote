@@ -56,6 +56,7 @@ describe("browser preview data adapter", () => {
         feishuTaskRemindersEnabled: false,
         feishuSourceEnabled: false,
         feishuSourceUrl: "",
+        feishuSecretEnabled: false,
       }),
     ).rejects.toThrow("只允许连接已授权");
   });

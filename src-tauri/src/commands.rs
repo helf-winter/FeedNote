@@ -11,8 +11,9 @@ use crate::{
     feishu_sync, mobile_push,
     models::{
         AppSettings, CaptureCommitResult, CreateFeedInput, CreateFeedResult, DeleteConfirmation,
-        FeedEvent, FeishuSourceStatus, FeishuSyncStatus, MemoryDetail, MemorySummary, PlanItem,
-        PlanProposal, ProcessResult, ReviewItem, Stats, UpdateSettingsInput,
+        FeedEvent, FeishuSecretStatus, FeishuSourceStatus, FeishuSyncStatus, MemoryDetail,
+        MemorySummary, PlanItem, PlanProposal, ProcessResult, ReviewItem, SecretItem,
+        SecretStashResult, Stats, UpdateSettingsInput, VaultStatus,
     },
     windows_selection::{self, SelectionSnapshot},
     AppState, PendingCapture,
@@ -135,6 +136,7 @@ pub fn update_settings(input: UpdateSettingsInput, state: State<'_, AppState>) -
         feishu_task_reminders_enabled: input.feishu_task_reminders_enabled,
         feishu_source_enabled: input.feishu_source_enabled,
         feishu_source_url: input.feishu_source_url,
+        feishu_secret_enabled: input.feishu_secret_enabled,
     })
 }
 
@@ -162,6 +164,22 @@ pub async fn sync_feishu_now(app: AppHandle, state: State<'_, AppState>) -> AppR
         &state.secrets_path,
         &state.feishu_syncing,
         &app,
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn get_feishu_secret_status(state: State<'_, AppState>) -> AppResult<FeishuSecretStatus> {
+    feishu_sync::secret_status(&state.database, &state.secrets_path)
+}
+
+#[tauri::command]
+pub async fn sync_feishu_secrets_now(state: State<'_, AppState>) -> AppResult<String> {
+    feishu_sync::sync_secrets_now(
+        &state.database,
+        &state.secrets_path,
+        &state.feishu_syncing,
+        &state.vault,
     )
     .await
 }
@@ -278,6 +296,148 @@ pub fn get_capture_preview(state: State<'_, AppState>) -> Option<SelectionSnapsh
         .expect("pending capture lock poisoned")
         .as_ref()
         .map(|capture| capture.snapshot.clone())
+}
+
+#[tauri::command]
+pub fn get_vault_status(state: State<'_, AppState>) -> AppResult<VaultStatus> {
+    state.vault.status(&state.database)
+}
+
+#[tauri::command]
+pub fn initialize_vault(password: String, state: State<'_, AppState>) -> AppResult<VaultStatus> {
+    state.vault.initialize(&state.database, &password)?;
+    state.vault.status(&state.database)
+}
+
+#[tauri::command]
+pub fn unlock_vault(password: String, state: State<'_, AppState>) -> AppResult<VaultStatus> {
+    state.vault.unlock(&state.database, &password)?;
+    state.vault.status(&state.database)
+}
+
+#[tauri::command]
+pub fn lock_vault(app: AppHandle, state: State<'_, AppState>) -> AppResult<VaultStatus> {
+    state.vault.lock();
+    let status = state.vault.status(&state.database)?;
+    let _ = app.emit("vault-changed", &status);
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn list_secret_items(state: State<'_, AppState>) -> AppResult<Vec<SecretItem>> {
+    state.vault.list(&state.database)
+}
+
+#[tauri::command]
+pub fn delete_secret_item(
+    secret_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.vault.delete(&state.database, &secret_id)?;
+    let _ = app.emit("vault-changed", &secret_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stash_capture(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<SecretStashResult> {
+    let snapshot = state
+        .pending_capture
+        .lock()
+        .expect("pending capture lock poisoned")
+        .as_ref()
+        .map(|capture| capture.snapshot.clone())
+        .ok_or_else(|| {
+            crate::error::AppError::Validation("选区授权已失效，请重新选择".to_string())
+        })?;
+    let item = state.vault.stash(
+        &state.database,
+        &snapshot.selected_text,
+        &snapshot.source_title,
+    )?;
+    *state
+        .pending_capture
+        .lock()
+        .expect("pending capture lock poisoned") = None;
+    let _ = app.emit("vault-changed", &item.id);
+
+    let database = state.database.clone();
+    let vault = state.vault.clone();
+    let settings = state.database.get_settings()?;
+    let secrets_path = state.secrets_path.clone();
+    let secret_id = item.id.clone();
+    let source_title = crate::vault::redact_text(&snapshot.selected_text, &snapshot.source_title);
+    let local_type_hint = item.payload.secret_type.clone();
+    let redacted_context =
+        crate::vault::redact_context(&snapshot.selected_text, &snapshot.surrounding_text);
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if settings.ai_enabled {
+            if let Ok(provider_secrets) = ai::ProviderSecrets::load(&secrets_path) {
+                if let Ok(metadata) = ai::enrich_secret_metadata(
+                    &settings,
+                    &provider_secrets,
+                    &redacted_context,
+                    &source_title,
+                    &local_type_hint,
+                )
+                .await
+                {
+                    if vault
+                        .apply_metadata(&database, &secret_id, &metadata)
+                        .is_ok()
+                    {
+                        let _ = app_for_task.emit("vault-changed", &secret_id);
+                    }
+                }
+            }
+        }
+    });
+
+    let sync_database = state.database.clone();
+    let sync_vault = state.vault.clone();
+    let sync_secrets_path = state.secrets_path.clone();
+    let sync_guard = state.feishu_syncing.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        let enabled = sync_database
+            .get_settings()
+            .is_ok_and(|settings| settings.feishu_secret_enabled);
+        if enabled {
+            let _ = feishu_sync::sync_secrets_now(
+                &sync_database,
+                &sync_secrets_path,
+                &sync_guard,
+                &sync_vault,
+            )
+            .await;
+        }
+    });
+
+    let now = chrono::Utc::now().timestamp_millis();
+    Ok(SecretStashResult {
+        secret_id: item.id,
+        message: "已藏入秘密备忘录".to_string(),
+        undo_until: now + 8_000,
+    })
+}
+
+#[tauri::command]
+pub fn undo_secret_stash(
+    secret_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.vault.delete_recent(
+        &state.database,
+        &secret_id,
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+    let _ = app.emit("vault-changed", &secret_id);
+    Ok(())
 }
 
 #[tauri::command]
