@@ -367,7 +367,7 @@ struct SourceRow {
     row_number: usize,
     status: String,
     company: String,
-    link: Option<String>,
+    role: String,
 }
 
 #[derive(Debug)]
@@ -577,8 +577,8 @@ async fn read_source_rows(
     };
     let status_col = column("状态")?;
     let company_col = column("公司/事项")?;
-    column("岗位/方向")?;
-    let link_col = column("链接")?;
+    let role_col = column("岗位/方向")?;
+    column("链接")?;
     column("备注")?;
     let mut rows = Vec::new();
     for (index, value) in values.iter().enumerate().skip(1) {
@@ -591,12 +591,12 @@ async fn read_source_rows(
         if company.is_empty() {
             continue;
         }
-        let link = nonempty(get(link_col));
+        let role = get(role_col).trim().to_string();
         rows.push(SourceRow {
             row_number: index + 1,
             status,
             company,
-            link,
+            role,
         });
     }
     Ok(rows)
@@ -622,12 +622,9 @@ fn validate_application_record(proposal: &ApplicationRecordProposal) -> AppResul
     if company.is_empty() || company.chars().count() > 200 {
         return Err(AppError::AiInvalid("公司/事项为空或过长".to_string()));
     }
-    if proposal
-        .role
-        .as_deref()
-        .is_some_and(|value| value.chars().count() > 200)
-    {
-        return Err(AppError::AiInvalid("岗位/方向过长".to_string()));
+    let role = proposal.role.as_deref().map(str::trim).unwrap_or_default();
+    if role.is_empty() || role.chars().count() > 200 {
+        return Err(AppError::AiInvalid("岗位/方向为空或过长".to_string()));
     }
     if proposal
         .notes
@@ -647,16 +644,14 @@ fn validate_application_record(proposal: &ApplicationRecordProposal) -> AppResul
 }
 
 fn application_row_matches(row: &SourceRow, proposal: &ApplicationRecordProposal) -> bool {
-    if company_matches(&row.company, &proposal.company) {
-        return true;
-    }
-    let proposed_link = proposal
-        .link_url
+    let proposed_role = proposal
+        .role
         .as_deref()
-        .map(normalize_value)
-        .filter(|value| !value.is_empty());
-    proposed_link.is_some()
-        && row.link.as_deref().map(normalize_value).as_ref() == proposed_link.as_ref()
+        .map(normalize_role)
+        .unwrap_or_default();
+    company_matches(&row.company, &proposal.company)
+        && !proposed_role.is_empty()
+        && normalize_role(&row.role) == proposed_role
 }
 
 fn company_matches(existing: &str, incoming: &str) -> bool {
@@ -697,13 +692,20 @@ fn normalize_company(value: &str) -> String {
     value
 }
 
-fn normalize_value(value: &str) -> String {
-    value
+fn normalize_role(value: &str) -> String {
+    let mut value: String = value
         .trim()
         .to_lowercase()
         .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect()
+        .filter(|character| character.is_alphanumeric())
+        .collect();
+    for suffix in ["岗位", "职位"] {
+        if let Some(stripped) = value.strip_suffix(suffix) {
+            value = stripped.to_string();
+            break;
+        }
+    }
+    value
 }
 
 fn application_row(proposal: &ApplicationRecordProposal) -> Vec<Value> {
@@ -801,11 +803,6 @@ fn cell_text(value: &Value) -> String {
             .unwrap_or_default()
             .to_string(),
     }
-}
-
-fn nonempty(value: String) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn source_token(value: &str) -> AppResult<String> {
@@ -2006,8 +2003,8 @@ mod tests {
         SourceRow {
             row_number: 2,
             status: "简历筛选".to_string(),
-            company: "示例公司".to_string(),
-            link: Some("https://example.com/apply".to_string()),
+            company: "烽火通信科技股份有限公司".to_string(),
+            role: "前端工程师".to_string(),
         }
     }
 
@@ -2078,30 +2075,30 @@ mod tests {
     }
 
     #[test]
-    fn application_rows_match_by_company_or_exact_link() {
+    fn application_rows_match_by_company_and_role() {
         let row = source_row();
-        assert!(application_row_matches(
+        assert!(!application_row_matches(
             &row,
             &application(
                 "另一家公司",
-                Some("后端工程师"),
+                Some("前端工程师"),
                 Some("https://example.com/apply")
             )
         ));
-        assert!(application_row_matches(
+        assert!(!application_row_matches(
             &row,
-            &application("示例公司", Some("完全不同的岗位"), None)
+            &application("烽火通信", Some("完全不同的岗位"), None)
+        ));
+        assert!(!application_row_matches(
+            &row,
+            &application("烽火通信", None, None)
         ));
         assert!(application_row_matches(
             &row,
-            &application("示例公司", None, None)
+            &application("烽火通信", Some("前端工程师岗位"), None)
         ));
         assert!(company_matches("烽火通信科技股份有限公司", "烽火通信"));
         assert!(!company_matches("中国移动研究院", "中国移动"));
-        assert!(!application_row_matches(
-            &row,
-            &application("另一家公司", None, None)
-        ));
     }
 
     #[test]

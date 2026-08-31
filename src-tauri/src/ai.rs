@@ -145,6 +145,7 @@ pub async fn route_capture(
             招聘网页、职位介绍、公司名单、投递状态本身不是计划；页面发布日期也不是计划时间。\n\
             createPlan=true 时必须提供 plan。只有完整日期和具体时间都明确才能填写 scheduledFor；缺任一项就 needsClarification=true 并询问用户。\n\
          2. writeApplicationRecord：只有文本处于求职招聘语境，并且能识别具体公司/事项时才为 true。\n\
+            company 和 role 都必须是明确的原始公司名与岗位名；role 只填写岗位名称，不得混入笔试、测评、面试轮次、链接名或通知标题。岗位无法识别时必须为 false。\n\
             applicationRecord.status 只使用：待投递、简历筛选、待笔试、待AI面、待一面、待二面、待三面、待HR面、已挂、Offer。\n\
             仅看到职位页面且没有已投递证据时用待投递；已投递但未有后续结果时用简历筛选；笔试邀请用待笔试；\n\
             AI 面用待AI面；明确一面/二面/三面分别使用对应状态；HR 面用待HR面；未说明轮次的普通面试用待一面；明确淘汰或拒绝用已挂。\n\
@@ -206,6 +207,15 @@ fn parse_capture_routing_response(
             .ok_or_else(|| AppError::AiInvalid("路由要求写入投递表但没有投递记录".to_string()))?;
         if record.company.trim().is_empty() {
             return Err(AppError::AiInvalid("投递记录缺少公司/事项".to_string()));
+        }
+        if record
+            .role
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            return Err(AppError::AiInvalid("投递记录缺少岗位/方向".to_string()));
         }
     }
     Ok(proposal)
