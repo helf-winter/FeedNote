@@ -229,9 +229,9 @@ function clearCloseTimer(): void {
 
     <form v-else-if="vaultAuthVisible" class="vault-auth" @submit.prevent="authorizeVaultAndStash">
       <p>{{ vaultStatus.initialized ? "输入主密码以解锁秘密备忘录" : "设置独立主密码，丢失后无法从本机恢复" }}</p>
-      <input v-model="masterPassword" type="password" minlength="12" maxlength="256" autofocus autocomplete="off" placeholder="主密码（至少 12 个字符）" />
-      <input v-if="!vaultStatus.initialized" v-model="confirmPassword" type="password" minlength="12" maxlength="256" autocomplete="off" placeholder="再次输入主密码" />
-      <button class="feed-button" type="submit" :disabled="busy || masterPassword.length < 12">
+      <input v-model="masterPassword" type="password" minlength="6" maxlength="256" autofocus autocomplete="off" placeholder="主密码（至少 6 个字符）" />
+      <input v-if="!vaultStatus.initialized" v-model="confirmPassword" type="password" minlength="6" maxlength="256" autocomplete="off" placeholder="再次输入主密码" />
+      <button class="feed-button" type="submit" :disabled="busy || masterPassword.length < 6">
         <LoaderCircle v-if="busy" class="spin" :size="15" />
         <span v-else>{{ vaultStatus.initialized ? "解锁并藏入" : "创建并藏入" }}</span>
       </button>

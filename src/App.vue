@@ -505,7 +505,7 @@ async function initializeSecretVault(): Promise<void> {
 }
 
 async function authenticateSecretVault(initializing = false): Promise<void> {
-  if (vaultBusy.value || vaultPassword.value.length < 12) return;
+  if (vaultBusy.value || vaultPassword.value.length < 6) return;
   vaultBusy.value = true;
   try {
     vaultStatus.value = initializing
@@ -789,9 +789,9 @@ function typeLabel(type: string): string {
           <span class="vault-gate-icon"><LockKeyhole :size="24" /></span>
           <h2>设置秘密备忘录主密码</h2>
           <p>主密码不会上传，也没有找回通道。</p>
-          <input v-model="vaultPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="至少 12 个字符" />
-          <input v-model="vaultPasswordConfirm" type="password" minlength="12" maxlength="256" autocomplete="new-password" placeholder="再次输入主密码" />
-          <button class="primary-button" type="submit" :disabled="vaultBusy || vaultPassword.length < 12 || !vaultPasswordConfirm">
+          <input v-model="vaultPassword" type="password" minlength="6" maxlength="256" autocomplete="new-password" placeholder="至少 6 个字符" />
+          <input v-model="vaultPasswordConfirm" type="password" minlength="6" maxlength="256" autocomplete="new-password" placeholder="再次输入主密码" />
+          <button class="primary-button" type="submit" :disabled="vaultBusy || vaultPassword.length < 6 || !vaultPasswordConfirm">
             <LoaderCircle v-if="vaultBusy" class="spin" :size="16" />
             <LockKeyhole v-else :size="16" />创建保险箱
           </button>

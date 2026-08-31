@@ -224,9 +224,9 @@ fn derive_key(password: &str, salt: &[u8]) -> AppResult<[u8; 32]> {
 }
 
 fn validate_master_password(password: &str) -> AppResult<()> {
-    if password.chars().count() < 12 || password.chars().count() > 256 {
+    if password.chars().count() < 6 || password.chars().count() > 256 {
         return Err(AppError::Validation(
-            "主密码长度必须为 12 到 256 个字符".to_string(),
+            "主密码长度必须为 6 到 256 个字符".to_string(),
         ));
     }
     Ok(())
@@ -397,5 +397,11 @@ mod tests {
     fn redaction_withholds_context_when_the_secret_location_is_unknown() {
         let redacted = redact_context("secret-123", "页面只返回了不完整的可访问文本");
         assert_eq!(redacted, "[周边文本未发送：无法确认脱敏位置]");
+    }
+
+    #[test]
+    fn master_password_requires_at_least_six_characters() {
+        assert!(validate_master_password("12345").is_err());
+        assert!(validate_master_password("123456").is_ok());
     }
 }
