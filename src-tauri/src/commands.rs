@@ -7,6 +7,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State,
 };
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::{
     ai,
@@ -120,13 +121,22 @@ pub fn get_stats(state: State<'_, AppState>) -> AppResult<Stats> {
 }
 
 #[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
-    state.database.get_settings()
+pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> AppResult<AppSettings> {
+    let mut settings = state.database.get_settings()?;
+    settings.launch_at_login = app.autolaunch().is_enabled().map_err(|error| {
+        crate::error::AppError::SystemIntegration(format!("无法读取开机自启动状态：{error}"))
+    })?;
+    Ok(settings)
 }
 
 #[tauri::command]
-pub fn update_settings(input: UpdateSettingsInput, state: State<'_, AppState>) -> AppResult<()> {
-    state.database.update_settings(&AppSettings {
+pub fn update_settings(
+    input: UpdateSettingsInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let settings = AppSettings {
+        launch_at_login: input.launch_at_login,
         ai_enabled: input.ai_enabled,
         llm_endpoint: input.llm_endpoint,
         llm_model: input.llm_model,
@@ -141,6 +151,33 @@ pub fn update_settings(input: UpdateSettingsInput, state: State<'_, AppState>) -
         feishu_source_enabled: input.feishu_source_enabled,
         feishu_source_url: input.feishu_source_url,
         feishu_secret_enabled: input.feishu_secret_enabled,
+    };
+    state.database.validate_settings(&settings)?;
+
+    let previous_autostart = app.autolaunch().is_enabled().map_err(|error| {
+        crate::error::AppError::SystemIntegration(format!("无法读取开机自启动状态：{error}"))
+    })?;
+    if settings.launch_at_login != previous_autostart {
+        set_launch_at_login(&app, settings.launch_at_login)?;
+    }
+
+    if let Err(error) = state.database.update_settings(&settings) {
+        if settings.launch_at_login != previous_autostart {
+            let _ = set_launch_at_login(&app, previous_autostart);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn set_launch_at_login(app: &AppHandle, enabled: bool) -> AppResult<()> {
+    let result = if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    };
+    result.map_err(|error| {
+        crate::error::AppError::SystemIntegration(format!("无法更新开机自启动：{error}"))
     })
 }
 

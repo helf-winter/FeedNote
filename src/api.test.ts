@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   createFeed,
   deleteFeed,
+  getSettings,
   getMemory,
   getStats,
   listFeeds,
@@ -44,6 +45,7 @@ describe("browser preview data adapter", () => {
     await expect(
       updateSettings({
         aiEnabled: true,
+        launchAtLogin: false,
         llmEndpoint: "https://example.com",
         llmModel: "glm-5.3",
         embeddingEndpoint: "https://open.bigmodel.cn/api/paas/v4",
@@ -59,6 +61,12 @@ describe("browser preview data adapter", () => {
         feishuSecretEnabled: false,
       }),
     ).rejects.toThrow("只允许连接已授权");
+  });
+
+  it("persists the launch-at-login preference", async () => {
+    const settings = await getSettings();
+    await updateSettings({ ...settings, launchAtLogin: true });
+    expect((await getSettings()).launchAtLogin).toBe(true);
   });
 
   it("updates statistics after capture", async () => {

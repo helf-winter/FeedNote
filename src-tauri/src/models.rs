@@ -74,6 +74,7 @@ pub struct Stats {
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    pub launch_at_login: bool,
     pub ai_enabled: bool,
     pub llm_endpoint: String,
     pub llm_model: String,
@@ -93,6 +94,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            launch_at_login: false,
             ai_enabled: true,
             llm_endpoint: "https://open.bigmodel.cn/api/anthropic".to_string(),
             llm_model: "glm-5.3".to_string(),
@@ -143,6 +145,7 @@ pub struct ProcessResult {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSettingsInput {
+    pub launch_at_login: bool,
     pub ai_enabled: bool,
     pub llm_endpoint: String,
     pub llm_model: String,
@@ -157,6 +160,18 @@ pub struct UpdateSettingsInput {
     pub feishu_source_enabled: bool,
     pub feishu_source_url: String,
     pub feishu_secret_enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn legacy_settings_default_launch_at_login_to_disabled() {
+        let settings: AppSettings = serde_json::from_str(r#"{"aiEnabled":false}"#).unwrap();
+        assert!(!settings.launch_at_login);
+        assert!(!settings.ai_enabled);
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

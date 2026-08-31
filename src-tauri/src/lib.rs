@@ -43,6 +43,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("FeedNote")
+                .arg("--autostart")
+                .build(),
+        )
         .setup(|app| {
             // The prototype is portable-first so user data stays beside the executable.
             let data_dir = std::env::var_os("FEEDNOTE_DATA_DIR")

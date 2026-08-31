@@ -71,6 +71,7 @@ export interface Stats {
 }
 
 export interface AppSettings {
+  launchAtLogin: boolean;
   aiEnabled: boolean;
   llmEndpoint: string;
   llmModel: string;
@@ -297,6 +298,7 @@ function initialMockState(): MockState {
       },
     ],
     settings: {
+      launchAtLogin: false,
       aiEnabled: true,
       llmEndpoint: "https://open.bigmodel.cn/api/anthropic",
       llmModel: "glm-5.3",

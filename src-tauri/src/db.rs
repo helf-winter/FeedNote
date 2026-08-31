@@ -1741,6 +1741,17 @@ impl Database {
     }
 
     pub fn update_settings(&self, settings: &AppSettings) -> AppResult<()> {
+        self.validate_settings(settings)?;
+        let connection = self.connection.lock().expect("database lock poisoned");
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES ('app', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [serde_json::to_string(settings)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn validate_settings(&self, settings: &AppSettings) -> AppResult<()> {
         validate_llm_endpoint(&settings.llm_endpoint)?;
         validate_embedding_endpoint(&settings.embedding_endpoint)?;
         if settings.llm_model.trim().is_empty() || settings.embedding_model.trim().is_empty() {
@@ -1764,12 +1775,6 @@ impl Database {
         if settings.feishu_source_enabled || !settings.feishu_source_url.trim().is_empty() {
             validate_feishu_source_url(&settings.feishu_source_url)?;
         }
-        let connection = self.connection.lock().expect("database lock poisoned");
-        connection.execute(
-            "INSERT INTO settings (key, value) VALUES ('app', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [serde_json::to_string(settings)?],
-        )?;
         Ok(())
     }
 

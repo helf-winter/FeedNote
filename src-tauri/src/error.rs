@@ -18,6 +18,8 @@ pub enum AppError {
     FeishuUnavailable(String),
     #[error("秘密保险箱不可用：{0}")]
     Vault(String),
+    #[error("系统集成失败：{0}")]
+    SystemIntegration(String),
     #[error("文件操作失败：{0}")]
     Io(#[from] std::io::Error),
     #[error("序列化失败：{0}")]

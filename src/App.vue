@@ -108,6 +108,7 @@ const memos = ref<MemoItem[]>([]);
 const reviews = ref<ReviewItem[]>([]);
 const stats = ref<Stats>({ totalFeeds: 0, totalMemories: 0, pendingReviews: 0, pendingProcessing: 0 });
 const settings = ref<AppSettings>({
+  launchAtLogin: false,
   aiEnabled: true,
   llmEndpoint: "https://open.bigmodel.cn/api/anthropic",
   llmModel: "glm-5.3",
@@ -1056,6 +1057,20 @@ function typeLabel(type: string): string {
       </section>
 
       <section v-else class="page settings-page">
+        <div class="settings-section">
+          <div class="settings-heading">
+            <div><h2>应用启动</h2><p>登录 Windows 后在后台启动 FeedNote。</p></div>
+            <label class="toggle-control">
+              <input v-model="settings.launchAtLogin" type="checkbox" />
+              <span aria-hidden="true" />
+              <strong>{{ settings.launchAtLogin ? "开机自启动" : "手动启动" }}</strong>
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button class="primary-button" type="button" @click="saveSettings"><Check :size="16" />保存设置</button>
+          </div>
+        </div>
+
         <div class="settings-section">
           <div class="settings-heading">
             <div><h2>自动理解</h2><p>保存后由 Memory Engine 自动分类、归并和摘要。</p></div>
