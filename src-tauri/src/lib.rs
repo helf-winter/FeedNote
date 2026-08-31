@@ -198,6 +198,7 @@ pub fn run() {
             commands::discard_capture,
             commands::get_capture_preview,
             commands::list_memos,
+            commands::update_memo,
             commands::record_memo_capture,
             commands::get_vault_status,
             commands::initialize_vault,

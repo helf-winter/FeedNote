@@ -66,6 +66,7 @@ import {
   syncFeishuSecretsNow,
   syncFeishuSourceNow,
   testMobilePush,
+  updateMemo,
   updateSettings,
   updateSecretItem,
   unlockVault,
@@ -93,6 +94,11 @@ interface SecretEditorForm {
   secretValue: string;
   website: string;
   notes: string;
+}
+
+interface MemoEditorForm {
+  id: string;
+  content: string;
 }
 
 const activePage = ref<Page>("inbox");
@@ -157,6 +163,8 @@ const feishuMemoStatus = ref<FeishuMemoStatus>({
   configured: false,
   pendingMemos: 0,
 });
+const memoEditor = ref<MemoEditorForm>();
+const memoEditBusy = ref(false);
 const feishuSourceState = ref<"idle" | "syncing" | "success" | "error">("idle");
 const feishuSourceMessage = ref("");
 const feishuSourceStatus = ref<FeishuSourceStatus>({
@@ -252,6 +260,7 @@ onMounted(async () => {
     if (event.key === "Escape") {
       selectedMemory.value = undefined;
       deleteTarget.value = undefined;
+      closeMemoEditor();
       closeSecretEditor();
       closeSecretDelete();
       sidebarOpen.value = false;
@@ -471,6 +480,35 @@ async function refreshMemos(): Promise<void> {
   }
 }
 
+function openMemoEditor(memo: MemoItem): void {
+  memoEditor.value = { id: memo.id, content: memo.content };
+}
+
+function closeMemoEditor(): void {
+  memoEditor.value = undefined;
+  memoEditBusy.value = false;
+}
+
+async function saveMemoEdit(): Promise<void> {
+  const editor = memoEditor.value;
+  if (!editor || memoEditBusy.value) return;
+  if (!editor.content.trim()) {
+    notify("备忘内容不能为空", "error");
+    return;
+  }
+  memoEditBusy.value = true;
+  try {
+    await updateMemo(editor.id, editor.content);
+    closeMemoEditor();
+    await refreshMemos();
+    notify("备忘已更新", "success");
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  } finally {
+    memoEditBusy.value = false;
+  }
+}
+
 async function runFeishuMemoSync(): Promise<void> {
   if (feishuMemoState.value === "syncing") return;
   feishuMemoState.value = "syncing";
@@ -537,6 +575,7 @@ async function exportData(): Promise<void> {
 }
 
 function navigate(page: Page): void {
+  closeMemoEditor();
   closeSecretEditor();
   closeSecretDelete();
   activePage.value = page;
@@ -942,6 +981,9 @@ function typeLabel(type: string): string {
           <article v-for="memo in memos" :key="memo.id" class="memo-card">
             <span class="memo-card-icon"><NotebookPen :size="17" /></span>
             <p>{{ memo.content }}</p>
+            <button class="icon-button memo-edit-button" type="button" title="编辑备忘" aria-label="编辑备忘" @click="openMemoEditor(memo)">
+              <Pencil :size="15" />
+            </button>
             <footer>
               <span>{{ memo.sourceTitle || '未知来源' }}</span>
               <span>{{ formatTime(memo.createdAt) }}</span>
@@ -1290,6 +1332,30 @@ function typeLabel(type: string): string {
             </section>
           </div>
         </aside>
+      </div>
+    </Transition>
+
+    <Transition name="modal">
+      <div v-if="memoEditor" class="modal-layer">
+        <button class="modal-scrim" aria-label="取消编辑" @click="closeMemoEditor" />
+        <form class="secret-dialog memo-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="memo-edit-title" @submit.prevent="saveMemoEdit">
+          <header>
+            <div><span class="secret-type">备忘录</span><h2 id="memo-edit-title">编辑备忘</h2></div>
+            <button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="closeMemoEditor"><X :size="18" /></button>
+          </header>
+          <label class="memo-edit-field">
+            <span>内容</span>
+            <textarea v-model="memoEditor.content" rows="8" maxlength="4000" required autofocus />
+            <small>{{ memoEditor.content.length }} / 4000</small>
+          </label>
+          <div class="dialog-actions">
+            <button class="secondary-button" type="button" @click="closeMemoEditor">取消</button>
+            <button class="primary-button" type="submit" :disabled="memoEditBusy || !memoEditor.content.trim()">
+              <LoaderCircle v-if="memoEditBusy" class="spin" :size="16" />
+              <Check v-else :size="16" />保存
+            </button>
+          </div>
+        </form>
       </div>
     </Transition>
 

@@ -398,6 +398,21 @@ pub fn list_memos(limit: Option<i64>, state: State<'_, AppState>) -> AppResult<V
 }
 
 #[tauri::command]
+pub fn update_memo(
+    memo_id: String,
+    content: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<MemoItem> {
+    let memo = state.database.update_memo(&memo_id, &content)?;
+    let _ = app.emit("memos-changed", &memo);
+    if memo.feishu_synced_at.is_none() {
+        schedule_memo_sync(&app, &state, memo.id.clone());
+    }
+    Ok(memo)
+}
+
+#[tauri::command]
 pub fn record_memo_capture(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -419,21 +434,23 @@ pub fn record_memo_capture(
         .lock()
         .expect("pending capture lock poisoned") = None;
     let _ = app.emit("memos-changed", &memo);
-
-    let database = state.database.clone();
-    let secrets_path = state.secrets_path.clone();
-    let sync_guard = state.feishu_syncing.clone();
-    let sync_app = app.clone();
-    let memo_id = memo.id.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = feishu_sync::sync_memos_now(&database, &secrets_path, &sync_guard).await;
-        let _ = sync_app.emit("memos-changed", &memo_id);
-    });
+    schedule_memo_sync(&app, &state, memo.id.clone());
 
     Ok(MemoCaptureResult {
         memo_id: memo.id,
         message: "已记入备忘录，正在同步飞书".to_string(),
     })
+}
+
+fn schedule_memo_sync(app: &AppHandle, state: &AppState, memo_id: String) {
+    let database = state.database.clone();
+    let secrets_path = state.secrets_path.clone();
+    let sync_guard = state.feishu_syncing.clone();
+    let sync_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = feishu_sync::sync_memos_now(&database, &secrets_path, &sync_guard).await;
+        let _ = sync_app.emit("memos-changed", &memo_id);
+    });
 }
 
 #[tauri::command]

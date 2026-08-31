@@ -555,6 +555,11 @@ export async function listMemos(limit = 500): Promise<MemoItem[]> {
   return [];
 }
 
+export async function updateMemo(memoId: string, content: string): Promise<MemoItem> {
+  if (isTauri) return invoke("update_memo", { memoId, content });
+  throw new Error("浏览器预览不提供备忘录编辑");
+}
+
 export async function discardCapture(): Promise<void> {
   return invoke("discard_capture");
 }

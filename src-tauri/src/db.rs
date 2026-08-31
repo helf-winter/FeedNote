@@ -1424,15 +1424,7 @@ impl Database {
     }
 
     pub fn create_memo(&self, content: &str, source_title: &str) -> AppResult<MemoItem> {
-        let content = content.trim();
-        if content.is_empty() {
-            return Err(AppError::Validation("备忘内容不能为空".to_string()));
-        }
-        if content.chars().count() > 4_000 {
-            return Err(AppError::Validation(
-                "单条备忘内容不能超过 4000 个字符".to_string(),
-            ));
-        }
+        let content = validate_memo_content(content)?;
         let item = MemoItem {
             id: Uuid::new_v4().to_string(),
             content: content.to_string(),
@@ -1447,6 +1439,32 @@ impl Database {
             params![item.id, item.content, item.source_title, item.created_at],
         )?;
         Ok(item)
+    }
+
+    pub fn update_memo(&self, id: &str, content: &str) -> AppResult<MemoItem> {
+        let content = validate_memo_content(content)?;
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let existing = connection
+            .query_row(
+                "SELECT id, content, source_title, created_at, feishu_synced_at
+                 FROM memo_records WHERE id = ?1",
+                [id],
+                map_memo,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound("备忘录不存在".to_string()))?;
+        if existing.content == content {
+            return Ok(existing);
+        }
+        connection.execute(
+            "UPDATE memo_records SET content = ?2, feishu_synced_at = NULL WHERE id = ?1",
+            params![id, content],
+        )?;
+        Ok(MemoItem {
+            content: content.to_string(),
+            feishu_synced_at: None,
+            ..existing
+        })
     }
 
     pub fn list_memos(&self, limit: i64) -> AppResult<Vec<MemoItem>> {
@@ -1478,16 +1496,25 @@ impl Database {
         )
     }
 
-    pub fn mark_memo_feishu_synced(&self, id: &str, synced_at: i64) -> AppResult<()> {
+    pub fn mark_memo_feishu_synced_if_current(
+        &self,
+        memo: &MemoItem,
+        synced_at: i64,
+    ) -> AppResult<bool> {
         let connection = self.connection.lock().expect("database lock poisoned");
         let changed = connection.execute(
-            "UPDATE memo_records SET feishu_synced_at = ?2 WHERE id = ?1",
-            params![id, synced_at],
+            "UPDATE memo_records SET feishu_synced_at = ?5
+             WHERE id = ?1 AND content = ?2 AND source_title = ?3 AND created_at = ?4
+               AND feishu_synced_at IS NULL",
+            params![
+                memo.id,
+                memo.content,
+                memo.source_title,
+                memo.created_at,
+                synced_at
+            ],
         )?;
-        if changed == 0 {
-            return Err(AppError::NotFound("备忘录不存在".to_string()));
-        }
-        Ok(())
+        Ok(changed == 1)
     }
 
     pub fn get_feishu_memo_sheet_state(&self) -> AppResult<Option<FeishuSheetState>> {
@@ -2150,6 +2177,19 @@ fn map_memo(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoItem> {
     })
 }
 
+fn validate_memo_content(content: &str) -> AppResult<&str> {
+    let content = content.trim();
+    if content.is_empty() {
+        return Err(AppError::Validation("备忘内容不能为空".to_string()));
+    }
+    if content.chars().count() > 4_000 {
+        return Err(AppError::Validation(
+            "单条备忘内容不能超过 4000 个字符".to_string(),
+        ));
+    }
+    Ok(content)
+}
+
 pub(crate) fn validate_plan_proposal(
     proposal: &PlanProposal,
     scheduled_at: Option<i64>,
@@ -2320,12 +2360,31 @@ mod tests {
         assert!(database.list_feeds(None, 20).unwrap().is_empty());
         assert!(database.list_plans(true).unwrap().is_empty());
 
-        database
-            .mark_memo_feishu_synced(&memo.id, memo.created_at + 1)
-            .unwrap();
+        assert!(database
+            .mark_memo_feishu_synced_if_current(&memo, memo.created_at + 1)
+            .unwrap());
         assert_eq!(database.count_pending_feishu_memos().unwrap(), 0);
+
+        let updated = database
+            .update_memo(&memo.id, "  改成帮助创作者整理长期灵感  ")
+            .unwrap();
+        assert_eq!(updated.content, "改成帮助创作者整理长期灵感");
+        assert_eq!(updated.source_title, memo.source_title);
+        assert_eq!(updated.created_at, memo.created_at);
+        assert!(updated.feishu_synced_at.is_none());
+        assert_eq!(database.count_pending_feishu_memos().unwrap(), 1);
+        assert!(!database
+            .mark_memo_feishu_synced_if_current(&memo, memo.created_at + 2)
+            .unwrap());
+        assert!(database
+            .mark_memo_feishu_synced_if_current(&updated, memo.created_at + 2)
+            .unwrap());
+        assert_eq!(database.count_pending_feishu_memos().unwrap(), 0);
+
         assert!(database.create_memo("   ", "微信").is_err());
         assert!(database.create_memo(&"字".repeat(4_001), "微信").is_err());
+        assert!(database.update_memo(&memo.id, "   ").is_err());
+        assert!(database.update_memo(&memo.id, &"字".repeat(4_001)).is_err());
     }
 
     #[test]

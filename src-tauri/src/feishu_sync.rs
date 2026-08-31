@@ -54,6 +54,11 @@ const SECRET_HEADERS: [&str; 8] = [
 ];
 const MEMO_HEADERS: [&str; 4] = ["本地备忘ID", "内容", "来源", "记录时间"];
 
+struct MemoSheetRow {
+    row_number: usize,
+    cells: Vec<String>,
+}
+
 struct CachedTenantToken {
     app_id: String,
     token: String,
@@ -1319,26 +1324,42 @@ async fn sync_memo_pending(database: &Database, secrets_path: &Path) -> AppResul
         .await?;
     }
     for memo in &pending {
-        if !rows.contains_key(&memo.id) {
+        if let Some(existing) = rows.get(&memo.id) {
+            write_values(
+                &client,
+                &token,
+                &state,
+                &format!("A{}:D{}", existing.row_number, existing.row_number),
+                vec![memo_row(memo)],
+            )
+            .await?;
+        } else {
             append_memo_values(&client, &token, &state, vec![memo_row(memo)]).await?;
         }
     }
 
     let verified_rows = read_memo_rows(&client, &token, &state).await?;
-    let missing = pending
+    let unverified = pending
         .iter()
-        .filter(|memo| !verified_rows.contains_key(&memo.id))
+        .filter(|memo| {
+            !verified_rows
+                .get(&memo.id)
+                .is_some_and(|row| memo_sheet_row_matches(row, memo))
+        })
         .count();
-    if missing > 0 {
+    if unverified > 0 {
         return Err(AppError::FeishuUnavailable(format!(
-            "备忘录表回读未找到 {missing} 条记录，本地仍保留为待同步"
+            "备忘录表有 {unverified} 条记录未通过回读校验，本地仍保留为待同步"
         )));
     }
     let synced_at = Utc::now().timestamp_millis();
+    let mut synced = 0;
     for memo in &pending {
-        database.mark_memo_feishu_synced(&memo.id, synced_at)?;
+        if database.mark_memo_feishu_synced_if_current(memo, synced_at)? {
+            synced += 1;
+        }
     }
-    Ok(pending.len())
+    Ok(synced)
 }
 
 async fn create_memo_sheet(
@@ -1388,8 +1409,8 @@ async fn read_memo_rows(
     client: &Client,
     token: &str,
     state: &FeishuSheetState,
-) -> AppResult<HashMap<String, usize>> {
-    let range = format!("{}!A:A", state.sheet_id);
+) -> AppResult<HashMap<String, MemoSheetRow>> {
+    let range = format!("{}!A:B", state.sheet_id);
     let mut url = Url::parse(&format!(
         "{API_BASE}/sheets/v2/spreadsheets/{}/values/",
         state.spreadsheet_token
@@ -1414,8 +1435,18 @@ async fn read_memo_rows(
         .iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            let id = row.as_array()?.first().map(cell_text)?;
-            (!id.is_empty() && id != MEMO_HEADERS[0]).then_some((id, index + 1))
+            let values = row.as_array()?;
+            let cells = (0..2)
+                .map(|column| values.get(column).map(cell_text).unwrap_or_default())
+                .collect::<Vec<_>>();
+            let id = cells.first()?.clone();
+            (!id.is_empty() && id != MEMO_HEADERS[0]).then_some((
+                id,
+                MemoSheetRow {
+                    row_number: index + 1,
+                    cells,
+                },
+            ))
         })
         .collect())
 }
@@ -1454,6 +1485,25 @@ fn memo_row(item: &MemoItem) -> Vec<Value> {
     .into_iter()
     .map(|value| json!(safe_cell(&value)))
     .collect()
+}
+
+fn memo_sheet_row_matches(row: &MemoSheetRow, item: &MemoItem) -> bool {
+    let expected = memo_row(item)
+        .iter()
+        .take(2)
+        .map(cell_text)
+        .collect::<Vec<_>>();
+    row.cells.len() >= expected.len()
+        && row
+            .cells
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| {
+                actual == expected
+                    || expected
+                        .strip_prefix('\'')
+                        .is_some_and(|unescaped| actual == unescaped)
+            })
 }
 
 async fn sync_secret_pending(
@@ -2096,6 +2146,15 @@ mod tests {
         assert_eq!(MEMO_HEADERS, ["本地备忘ID", "内容", "来源", "记录时间"]);
         assert_eq!(row.len(), 4);
         assert_eq!(row[1], json!("'=创业想法"));
+
+        let remote = MemoSheetRow {
+            row_number: 2,
+            cells: row.iter().map(cell_text).collect(),
+        };
+        assert!(memo_sheet_row_matches(&remote, &item));
+        let mut stale = remote;
+        stale.cells[1] = "旧内容".to_string();
+        assert!(!memo_sheet_row_matches(&stale, &item));
     }
 
     #[test]

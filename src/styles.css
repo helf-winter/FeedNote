@@ -662,17 +662,24 @@ button:disabled {
 }
 
 .memo-card {
+  position: relative;
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);
   align-content: start;
   min-height: 132px;
-  padding: 16px;
+  padding: 16px 48px 16px 16px;
   gap: 10px 12px;
   background: #fff;
   border: 1px solid #dce1de;
   border-left: 3px solid #c79b45;
   border-radius: 7px;
   box-shadow: 0 7px 20px rgb(35 45 39 / 5%);
+}
+
+.memo-edit-button {
+  position: absolute;
+  top: 11px;
+  right: 11px;
 }
 
 .memo-card-icon {
@@ -724,6 +731,44 @@ button:disabled {
 .memo-pending {
   color: #9a6817;
   white-space: nowrap;
+}
+
+.memo-edit-dialog {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.memo-edit-field {
+  display: grid;
+  gap: 7px;
+  margin-top: 20px;
+  color: #6f7973;
+  font-size: 11px;
+}
+
+.memo-edit-field textarea {
+  width: 100%;
+  min-height: 180px;
+  padding: 11px 12px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  resize: vertical;
+  background: #fff;
+  border: 1px solid #d9dfdb;
+  border-radius: 5px;
+  outline: none;
+}
+
+.memo-edit-field textarea:focus {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgb(31 126 117 / 10%);
+}
+
+.memo-edit-field small {
+  justify-self: end;
+  color: var(--faint);
+  font-size: 10px;
 }
 
 .secrets-page {
