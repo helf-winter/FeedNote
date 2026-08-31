@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::OnceLock, time::Duration};
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -13,10 +13,14 @@ use crate::{
     secrets::parse_env,
 };
 
+static MODEL_CLIENT: OnceLock<Client> = OnceLock::new();
+static EMBEDDING_CLIENT: OnceLock<Client> = OnceLock::new();
+
 #[derive(Debug)]
 pub struct ProviderSecrets {
     auth_token: String,
     embedding_api_key: Option<String>,
+    small_fast_model: Option<String>,
 }
 
 impl ProviderSecrets {
@@ -36,9 +40,16 @@ impl ProviderSecrets {
             .get("EMBEDDING_API_KEY")
             .filter(|value| !value.trim().is_empty())
             .cloned();
+        let small_fast_model = values
+            .get("ANTHROPIC_SMALL_FAST_MODEL")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         Ok(Self {
             auth_token,
             embedding_api_key,
+            small_fast_model,
         })
     }
 
@@ -46,6 +57,10 @@ impl ProviderSecrets {
         self.embedding_api_key
             .as_deref()
             .unwrap_or(&self.auth_token)
+    }
+
+    fn routing_model<'a>(&'a self, fallback: &'a str) -> &'a str {
+        self.small_fast_model.as_deref().unwrap_or(fallback)
     }
 }
 
@@ -136,15 +151,17 @@ pub async fn route_capture(
          只返回一个 JSON 对象：\n\
          createPlan、planConfidence（0到1）、writeApplicationRecord、applicationConfidence（0到1）、reason；\n\
          plan 为 null 或对象，字段为 title、details、content、linkUrl、notes、scheduledFor、timeEvidence、needsClarification、clarificationQuestion；\n\
+         plan.title 不超过 80 字，content 必须是一句话且不超过 60 字，notes 不超过 500 字；\n\
          applicationRecord 为 null 或对象，字段为 status、company、role、linkUrl、notes。\n\
          不要返回 Markdown。"
     );
-    let response = send_message(
+    let response = send_message_with_model(
         settings,
         secrets,
+        secrets.routing_model(&settings.llm_model),
         "你是 FeedNote 的谨慎路由器。你只返回结构化建议，应用会校验后决定本地建计划、写入用户指定的投递表或仅保存记忆。",
         &user_prompt,
-        1200,
+        768,
     )
     .await?;
     parse_capture_routing_response(response)
@@ -155,8 +172,11 @@ fn parse_capture_routing_response(
 ) -> AppResult<CaptureRoutingProposal> {
     let text = response_text(response)?;
     let json_text = extract_json_object(&text)?;
-    let proposal: CaptureRoutingProposal = serde_json::from_str(json_text)
+    let mut proposal: CaptureRoutingProposal = serde_json::from_str(json_text)
         .map_err(|error| AppError::AiInvalid(format!("选区路由结果解析失败：{error}")))?;
+    if let Some(plan) = proposal.plan.as_mut() {
+        normalize_plan_content(plan);
+    }
     for (name, confidence) in [
         ("计划", proposal.plan_confidence),
         ("投递记录", proposal.application_confidence),
@@ -226,10 +246,36 @@ pub async fn resolve_plan_time(
 fn parse_plan_response(response: AnthropicResponse) -> AppResult<PlanProposal> {
     let text = response_text(response)?;
     let json_text = extract_json_object(&text)?;
-    let proposal: PlanProposal = serde_json::from_str(json_text)
+    let mut proposal: PlanProposal = serde_json::from_str(json_text)
         .map_err(|error| AppError::AiInvalid(format!("计划结果解析失败：{error}")))?;
+    normalize_plan_content(&mut proposal);
     validate_plan_state(&proposal)?;
     Ok(proposal)
+}
+
+fn normalize_plan_content(proposal: &mut PlanProposal) {
+    proposal.title = proposal.title.trim().chars().take(80).collect();
+    let content = proposal.content.trim();
+    let source = if content.is_empty() {
+        let from_details = proposal
+            .details
+            .split(['。', '！', '？', '\n'])
+            .next()
+            .unwrap_or(&proposal.details)
+            .trim();
+        if from_details.is_empty() {
+            proposal.title.as_str()
+        } else {
+            from_details
+        }
+    } else {
+        content
+    };
+    proposal.content = source.chars().take(60).collect();
+    proposal.notes = proposal.notes.as_ref().and_then(|notes| {
+        let normalized: String = notes.trim().chars().take(500).collect();
+        (!normalized.is_empty()).then_some(normalized)
+    });
 }
 
 fn validate_plan_state(proposal: &PlanProposal) -> AppResult<()> {
@@ -262,6 +308,25 @@ async fn send_message(
     user_prompt: &str,
     max_tokens: u32,
 ) -> AppResult<AnthropicResponse> {
+    send_message_with_model(
+        settings,
+        secrets,
+        &settings.llm_model,
+        system_prompt,
+        user_prompt,
+        max_tokens,
+    )
+    .await
+}
+
+async fn send_message_with_model(
+    settings: &AppSettings,
+    secrets: &ProviderSecrets,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    max_tokens: u32,
+) -> AppResult<AnthropicResponse> {
     let endpoint = format!(
         "{}/v1/messages",
         settings.llm_endpoint.trim_end_matches('/')
@@ -272,7 +337,7 @@ async fn send_message(
         .header("x-api-key", &secrets.auth_token)
         .header("anthropic-version", "2023-06-01")
         .json(&json!({
-            "model": settings.llm_model,
+            "model": model,
             "max_tokens": max_tokens,
             "thinking": { "type": "disabled" },
             "system": system_prompt,
@@ -324,10 +389,20 @@ async fn check_embedding(settings: &AppSettings, secrets: &ProviderSecrets) -> A
 }
 
 fn client(timeout: Duration) -> AppResult<Client> {
-    Client::builder()
+    let cache = if timeout > Duration::from_secs(30) {
+        &MODEL_CLIENT
+    } else {
+        &EMBEDDING_CLIENT
+    };
+    if let Some(client) = cache.get() {
+        return Ok(client.clone());
+    }
+    let client = Client::builder()
         .timeout(timeout)
         .build()
-        .map_err(|error| AppError::AiUnavailable(error.to_string()))
+        .map_err(|error| AppError::AiUnavailable(error.to_string()))?;
+    let _ = cache.set(client.clone());
+    Ok(cache.get().cloned().unwrap_or(client))
 }
 
 fn response_text(response: AnthropicResponse) -> AppResult<String> {
@@ -377,6 +452,12 @@ mod tests {
     fn parses_env_without_exposing_values() {
         let values = parse_env("# comment\nANTHROPIC_AUTH_TOKEN='secret.value'\n");
         assert_eq!(values.get("ANTHROPIC_AUTH_TOKEN").unwrap(), "secret.value");
+        let secrets = ProviderSecrets {
+            auth_token: "secret.value".to_string(),
+            embedding_api_key: None,
+            small_fast_model: Some("glm-5.2".to_string()),
+        };
+        assert_eq!(secrets.routing_model("glm-5.3"), "glm-5.2");
     }
 
     #[test]
@@ -411,6 +492,27 @@ mod tests {
             proposal.scheduled_for.as_deref(),
             Some("2026-08-31T09:00:00+08:00")
         );
+    }
+
+    #[test]
+    fn normalizes_verbose_or_empty_plan_content() {
+        let mut proposal = PlanProposal {
+            title: "面试".to_string(),
+            details: "参加前端开发工程师面试。携带作品集".to_string(),
+            content: "这是一段明显超过卡片一句话限制的模型输出，用来验证系统不会因为模型偶尔过度展开而拒绝整次用户投喂，并且最终只保留安全长度的简短内容摘要。".to_string(),
+            link_url: None,
+            notes: None,
+            scheduled_for: Some("2026-08-31T09:00:00+08:00".to_string()),
+            time_evidence: Some("上午九点".to_string()),
+            needs_clarification: false,
+            clarification_question: None,
+        };
+        normalize_plan_content(&mut proposal);
+        assert_eq!(proposal.content.chars().count(), 60);
+
+        proposal.content.clear();
+        normalize_plan_content(&mut proposal);
+        assert_eq!(proposal.content, "参加前端开发工程师面试");
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex, OnceLock,
     },
     time::Duration,
 };
@@ -38,6 +38,15 @@ const HEADERS: [&str; 9] = [
     "更新时间",
 ];
 const TASK_UPDATE_FIELDS: [&str; 5] = ["summary", "description", "start", "due", "completed_at"];
+
+struct CachedTenantToken {
+    app_id: String,
+    token: String,
+    expires_at: i64,
+}
+
+static TENANT_TOKEN_CACHE: OnceLock<Mutex<Option<CachedTenantToken>>> = OnceLock::new();
+static FEISHU_CLIENT: OnceLock<Client> = OnceLock::new();
 
 struct FeishuSecrets {
     app_id: String,
@@ -247,6 +256,7 @@ struct SourceRow {
 struct SourceSheet {
     sheet_id: String,
     title: String,
+    row_count: u64,
     rows: Vec<SourceRow>,
 }
 
@@ -316,9 +326,15 @@ pub async fn write_application_record(
         ("created", row_number)
     };
 
-    let verified = read_source_sheet(&client, &token, &spreadsheet_token).await?;
-    let verified_row = verified
-        .rows
+    let verified_rows = read_source_rows(
+        &client,
+        &token,
+        &spreadsheet_token,
+        &source.sheet_id,
+        source.row_count.max(expected_row as u64),
+    )
+    .await?;
+    let verified_row = verified_rows
         .iter()
         .find(|row| application_row_matches(row, proposal))
         .ok_or_else(|| {
@@ -331,7 +347,7 @@ pub async fn write_application_record(
         } else {
             verified_row.row_number
         },
-        sheet_title: verified.title,
+        sheet_title: source.title,
         company: proposal.company.trim().to_string(),
         role: proposal
             .role
@@ -393,6 +409,22 @@ async fn read_source_sheet(
         .as_u64()
         .unwrap_or(200)
         .clamp(1, 5_000);
+    let rows = read_source_rows(client, token, spreadsheet_token, &sheet_id, row_count).await?;
+    Ok(SourceSheet {
+        sheet_id,
+        title,
+        row_count,
+        rows,
+    })
+}
+
+async fn read_source_rows(
+    client: &Client,
+    token: &str,
+    spreadsheet_token: &str,
+    sheet_id: &str,
+    row_count: u64,
+) -> AppResult<Vec<SourceRow>> {
     let range = format!("{sheet_id}!A1:E{row_count}");
     let mut url = Url::parse(&format!(
         "{API_BASE}/sheets/v2/spreadsheets/{spreadsheet_token}/values/"
@@ -448,11 +480,7 @@ async fn read_source_sheet(
             notes,
         });
     }
-    Ok(SourceSheet {
-        sheet_id,
-        title,
-        rows,
-    })
+    Ok(rows)
 }
 
 fn validate_application_record(proposal: &ApplicationRecordProposal) -> AppResult<()> {
@@ -1162,6 +1190,17 @@ fn pull_plan_sheet_statuses(
 }
 
 async fn tenant_access_token(client: &Client, secrets: &FeishuSecrets) -> AppResult<String> {
+    let now = Utc::now().timestamp_millis();
+    let cache = TENANT_TOKEN_CACHE.get_or_init(|| Mutex::new(None));
+    if let Some(token) = cache
+        .lock()
+        .expect("tenant token cache poisoned")
+        .as_ref()
+        .filter(|cached| cached.app_id == secrets.app_id && cached.expires_at > now + 60_000)
+        .map(|cached| cached.token.clone())
+    {
+        return Ok(token);
+    }
     let response = client
         .post(format!("{API_BASE}/auth/v3/tenant_access_token/internal"))
         .json(&json!({
@@ -1172,11 +1211,20 @@ async fn tenant_access_token(client: &Client, secrets: &FeishuSecrets) -> AppRes
         .await
         .map_err(network_error)?;
     let payload = checked_json(response).await?;
-    payload["tenant_access_token"]
+    let token = payload["tenant_access_token"]
         .as_str()
         .filter(|token| !token.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| AppError::FeishuUnavailable("飞书没有返回 tenant_access_token".to_string()))
+        .ok_or_else(|| {
+            AppError::FeishuUnavailable("飞书没有返回 tenant_access_token".to_string())
+        })?;
+    let expires_in = payload["expire"].as_i64().unwrap_or(3_600).clamp(60, 7_200);
+    *cache.lock().expect("tenant token cache poisoned") = Some(CachedTenantToken {
+        app_id: secrets.app_id.clone(),
+        token: token.clone(),
+        expires_at: now + expires_in * 1_000,
+    });
+    Ok(token)
 }
 
 async fn create_sheet(
@@ -1452,10 +1500,15 @@ fn required_secret(values: &HashMap<String, String>, key: &str) -> AppResult<Str
 }
 
 fn client() -> AppResult<Client> {
-    Client::builder()
+    if let Some(client) = FEISHU_CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|error| AppError::FeishuUnavailable(error.to_string()))
+        .map_err(|error| AppError::FeishuUnavailable(error.to_string()))?;
+    let _ = FEISHU_CLIENT.set(client.clone());
+    Ok(FEISHU_CLIENT.get().cloned().unwrap_or(client))
 }
 
 fn network_error(error: reqwest::Error) -> AppError {

@@ -344,6 +344,16 @@ pub async fn commit_capture(
         settings.feishu_source_enabled && !settings.feishu_source_url.trim().is_empty();
     let should_write_application = application_route_accepted && application_channel_ready;
     let should_create_plan = routing.create_plan && routing.plan_confidence >= PLAN_ROUTE_THRESHOLD;
+    let validated_plan_time = if should_create_plan {
+        let proposal = routing.plan.as_ref().ok_or_else(|| {
+            crate::error::AppError::AiInvalid("计划路由缺少结构化内容".to_string())
+        })?;
+        let scheduled_at = parse_scheduled_at(proposal.scheduled_for.as_deref())?;
+        crate::db::validate_plan_proposal(proposal, scheduled_at)?;
+        Some(scheduled_at)
+    } else {
+        None
+    };
     let application_record = if should_write_application {
         Some(
             feishu_sync::write_application_record(
@@ -362,7 +372,7 @@ pub async fn commit_capture(
         let proposal = routing.plan.as_ref().ok_or_else(|| {
             crate::error::AppError::AiInvalid("计划路由缺少结构化内容".to_string())
         })?;
-        let scheduled_at = parse_scheduled_at(proposal.scheduled_for.as_deref())?;
+        let scheduled_at = validated_plan_time.flatten();
         let plan = state.database.create_plan(
             &feed.feed_id,
             proposal,

@@ -88,7 +88,7 @@ data\secrets.env
 ANTHROPIC_AUTH_TOKEN=
 ```
 
-LLM 地址和模型使用应用内默认值 `https://open.bigmodel.cn/api/anthropic` 与 `glm-5.3`。Embedding 默认使用 `embedding-3`、512 维；若需独立密钥，可在同一文件添加 `EMBEDDING_API_KEY=`。目前账号没有 Embedding 通用额度时，应用会自动使用本地 FTS5 检索，不影响分类。
+LLM 地址和模型使用应用内默认值 `https://open.bigmodel.cn/api/anthropic` 与 `glm-5.3`。若后续有确认更快且兼容结构化输出的模型，可在同一文件添加 `ANTHROPIC_SMALL_FAST_MODEL=`，仅让选区路由使用它；未填写时继续使用主模型。Embedding 默认使用 `embedding-3`、512 维；若需独立密钥，可添加 `EMBEDDING_API_KEY=`。目前账号没有 Embedding 通用额度时，应用会自动使用本地 FTS5 检索，不影响分类。
 
 未来本地小模型通过 Provider 接口接入；原始数据结构和 Memory Engine 不与智谱绑定。
 

@@ -1736,7 +1736,10 @@ fn map_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanItem> {
     })
 }
 
-fn validate_plan_proposal(proposal: &PlanProposal, scheduled_at: Option<i64>) -> AppResult<()> {
+pub(crate) fn validate_plan_proposal(
+    proposal: &PlanProposal,
+    scheduled_at: Option<i64>,
+) -> AppResult<()> {
     if proposal.title.trim().is_empty() || proposal.title.chars().count() > 80 {
         return Err(AppError::AiInvalid("计划标题为空或超过 80 字".to_string()));
     }
