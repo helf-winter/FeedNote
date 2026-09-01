@@ -32,6 +32,7 @@ import {
   Smartphone,
   Sparkles,
   Table2,
+  Tag,
   Trash2,
   UnlockKeyhole,
   X,
@@ -115,6 +116,7 @@ interface PlanEditorForm {
   notes: string;
   scheduledLocal: string;
   reminderMinutesBefore: number;
+  tag: string;
 }
 
 const activePage = ref<Page>("inbox");
@@ -129,6 +131,7 @@ const memories = ref<MemorySummary[]>([]);
 const memos = ref<MemoItem[]>([]);
 const plans = ref<PlanItem[]>([]);
 const planView = ref<"active" | "all">("active");
+const planTagFilter = ref<"all" | "面试">("all");
 const reviews = ref<ReviewItem[]>([]);
 const stats = ref<Stats>({ totalFeeds: 0, totalMemories: 0, pendingReviews: 0, pendingProcessing: 0 });
 const settings = ref<AppSettings>({
@@ -219,9 +222,10 @@ const filteredSecrets = computed(() => {
       .some((value) => value!.toLowerCase().includes(query)),
   );
 });
-const visiblePlans = computed(() =>
-  planView.value === "all" ? plans.value : plans.value.filter((plan) => plan.status !== "done"),
-);
+const visiblePlans = computed(() => {
+  const byStatus = planView.value === "all" ? plans.value : plans.value.filter((plan) => plan.status !== "done");
+  return planTagFilter.value === "all" ? byStatus : byStatus.filter((plan) => plan.tag === planTagFilter.value);
+});
 const activePlanCount = computed(() => plans.value.filter((plan) => plan.status !== "done").length);
 
 const pageTitles: Record<Page, { title: string; subtitle: string }> = {
@@ -582,6 +586,7 @@ function openPlanEditor(plan: PlanItem): void {
     notes: plan.notes ?? "",
     scheduledLocal: toLocalDateTimeInput(plan.scheduledAt),
     reminderMinutesBefore: plan.reminderMinutesBefore,
+    tag: plan.tag ?? "",
   };
 }
 
@@ -612,6 +617,7 @@ async function savePlanEdit(): Promise<void> {
       notes: editor.notes || undefined,
       scheduledAt,
       reminderMinutesBefore: editor.reminderMinutesBefore,
+      tag: editor.tag || undefined,
     });
     closePlanEditor();
     await Promise.all([refreshPlans(), refreshFeishuStatus()]);
@@ -1127,22 +1133,25 @@ function typeLabel(type: string): string {
       <section v-else-if="activePage === 'plans'" class="page plans-page">
         <div class="plans-toolbar">
           <span>{{ activePlanCount }} 项进行中 · {{ plans.length }} 项全部</span>
-          <div class="plan-view-control" role="group" aria-label="计划范围">
-            <button type="button" :class="{ active: planView === 'active' }" @click="planView = 'active'">进行中</button>
-            <button type="button" :class="{ active: planView === 'all' }" @click="planView = 'all'">全部</button>
+          <div class="plans-toolbar-controls">
+            <label class="plan-tag-filter"><Tag :size="14" /><select v-model="planTagFilter" aria-label="按标签筛选计划"><option value="all">全部标签</option><option value="面试">面试</option></select></label>
+            <div class="plan-view-control" role="group" aria-label="计划范围">
+              <button type="button" :class="{ active: planView === 'active' }" @click="planView = 'active'">进行中</button>
+              <button type="button" :class="{ active: planView === 'all' }" @click="planView = 'all'">全部</button>
+            </div>
           </div>
         </div>
 
         <div v-if="visiblePlans.length === 0" class="empty-state">
           <CalendarClock :size="28" />
-          <strong>{{ planView === 'active' ? '没有进行中的计划' : '还没有桌面计划' }}</strong>
+          <strong>{{ planTagFilter === '面试' ? '没有面试计划' : (planView === 'active' ? '没有进行中的计划' : '还没有桌面计划') }}</strong>
           <span>从选区浮球选择“喂”后，识别出的待办会出现在这里。</span>
         </div>
         <div v-else class="main-plan-list">
           <article v-for="plan in visiblePlans" :key="plan.id" class="main-plan-card" :class="{ done: plan.status === 'done', unscheduled: !plan.scheduledAt }">
             <div class="main-plan-head">
               <div>
-                <span class="plan-schedule"><CalendarClock :size="15" />{{ formatPlanSchedule(plan.scheduledAt) }}</span>
+                <div class="main-plan-meta"><span class="plan-schedule"><CalendarClock :size="15" />{{ formatPlanSchedule(plan.scheduledAt) }}</span><span v-if="plan.tag" class="plan-tag"><Tag :size="12" />{{ plan.tag }}</span></div>
                 <h2>{{ plan.title }}</h2>
               </div>
               <button class="icon-button" type="button" title="编辑计划" aria-label="编辑计划" @click="openPlanEditor(plan)"><Pencil :size="16" /></button>
@@ -1522,6 +1531,7 @@ function typeLabel(type: string): string {
             <label class="wide-field"><span>标题</span><input v-model="planEditor.title" maxlength="80" required autofocus /></label>
             <label><span>时间</span><input v-model="planEditor.scheduledLocal" type="datetime-local" /></label>
             <label><span>飞书提醒</span><select v-model.number="planEditor.reminderMinutesBefore"><option :value="0">准时</option><option :value="5">提前 5 分钟</option><option :value="15">提前 15 分钟</option><option :value="30">提前 30 分钟</option><option :value="60">提前 1 小时</option><option :value="180">提前 3 小时</option><option :value="1440">提前 1 天</option></select></label>
+            <label><span>标签</span><select v-model="planEditor.tag"><option value="">无标签</option><option value="面试">面试</option></select></label>
             <label><span>内容</span><input v-model="planEditor.content" maxlength="60" required /></label>
             <label class="wide-field"><span>详情</span><textarea v-model="planEditor.details" rows="4" maxlength="4000" required /></label>
             <label class="wide-field"><span>链接</span><input v-model.trim="planEditor.linkUrl" type="url" maxlength="2000" placeholder="https://" /></label>

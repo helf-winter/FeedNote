@@ -187,9 +187,10 @@ pub async fn route_capture(
          例如：职位详情页通常只写投递记录；‘明天下午三点某公司 AI 面’应同时写投递记录和创建计划；普通知识只进入记忆。\n\n\
          只返回一个 JSON 对象：\n\
          createPlan、planConfidence（0到1）、writeApplicationRecord、applicationConfidence（0到1）、reason；\n\
-         plan 为 null 或对象，字段为 title、details、content、linkUrl、notes、scheduledFor、timeEvidence、needsClarification、clarificationQuestion、reminderMinutesBefore；\n\
+         plan 为 null 或对象，字段为 title、details、content、linkUrl、notes、scheduledFor、timeEvidence、needsClarification、clarificationQuestion、reminderMinutesBefore、tag；\n\
          plan.title 不超过 80 字，content 必须是一句话且不超过 60 字，notes 不超过 500 字；\n\
          reminderMinutesBefore 是 0 到 10080 的整数，默认 180。只有用户明确指定提醒时才覆盖默认值：‘准时提醒’、‘到点提醒’、‘提醒时间与任务时间相同’或‘不用提前’填 0；‘提前 N 分钟/小时’换算成分钟；\n\
+         tag 目前只允许 null 或‘面试’。招聘面试、AI 面、一面至三面、HR 面、初面、复试或终面计划填‘面试’，其他计划填 null；\n\
          applicationRecord 为 null 或对象，字段为 status、company、role、linkUrl、notes。\n\
          不要返回 Markdown。"
     );
@@ -291,15 +292,16 @@ pub async fn resolve_plan_time(
          新计划与 occupied_slots 中任一开始时间至少间隔 60 分钟，不能使用相同时间。没有合适空档时继续询问用户，不得制造冲突。\n\
          保留原计划中已经提取出的链接和注意事项，除非回答提供了更准确的信息。\
          只返回 JSON：title、details、content、linkUrl、notes、scheduledFor（RFC3339，使用 +08:00；仍不完整则 null）、\
-         timeEvidence、needsClarification、clarificationQuestion、reminderMinutesBefore。保留原计划的 reminderMinutesBefore，除非回答明确改变提醒提前量。若仍缺完整日期或具体时间，继续提出一个具体问题。不要返回 Markdown。",
+         timeEvidence、needsClarification、clarificationQuestion、reminderMinutesBefore、tag。保留原计划的 reminderMinutesBefore 和 tag，除非回答明确改变它们。tag 只允许 null 或‘面试’。若仍缺完整日期或具体时间，继续提出一个具体问题。不要返回 Markdown。",
         plan.title,
         format!(
-            "{}\n内容：{}\n链接：{}\n注意事项：{}\n提醒提前量：{} 分钟",
+            "{}\n内容：{}\n链接：{}\n注意事项：{}\n提醒提前量：{} 分钟\n标签：{}",
             plan.details,
             plan.content,
             plan.link_url.as_deref().unwrap_or("无"),
             plan.notes.as_deref().unwrap_or("无"),
-            plan.reminder_minutes_before
+            plan.reminder_minutes_before,
+            plan.tag.as_deref().unwrap_or("无")
         ),
         answer,
         occupied_slots
@@ -418,6 +420,20 @@ fn normalize_plan_content(proposal: &mut PlanProposal) {
         let normalized: String = notes.trim().chars().take(500).collect();
         (!normalized.is_empty()).then_some(normalized)
     });
+    proposal.tag = normalized_plan_tag(proposal);
+}
+
+fn normalized_plan_tag(proposal: &PlanProposal) -> Option<String> {
+    let explicitly_interview = proposal.tag.as_deref().map(str::trim) == Some("面试");
+    let plan_text = format!(
+        "{}\n{}\n{}",
+        proposal.title, proposal.details, proposal.content
+    );
+    let interview_terms = [
+        "面试", "AI面", "AI 面", "一面", "二面", "三面", "HR面", "HR 面", "初面", "复试", "终面",
+    ];
+    (explicitly_interview || interview_terms.iter().any(|term| plan_text.contains(term)))
+        .then(|| "面试".to_string())
 }
 
 fn validate_plan_state(proposal: &PlanProposal) -> AppResult<()> {
@@ -663,9 +679,11 @@ mod tests {
             needs_clarification: false,
             clarification_question: None,
             reminder_minutes_before: 180,
+            tag: None,
         };
         normalize_plan_content(&mut proposal);
         assert_eq!(proposal.content.chars().count(), 60);
+        assert_eq!(proposal.tag.as_deref(), Some("面试"));
 
         proposal.content.clear();
         normalize_plan_content(&mut proposal);
@@ -723,7 +741,9 @@ mod tests {
             proposal.application_record.as_ref().unwrap().status,
             "待AI面"
         );
-        assert_eq!(proposal.plan.unwrap().content, "面试");
+        let plan = proposal.plan.unwrap();
+        assert_eq!(plan.content, "面试");
+        assert_eq!(plan.tag.as_deref(), Some("面试"));
     }
 
     #[test]
@@ -833,6 +853,10 @@ mod tests {
         .unwrap();
         assert!(interview.write_application_record);
         assert!(interview.create_plan);
+        assert_eq!(
+            interview.plan.as_ref().and_then(|plan| plan.tag.as_deref()),
+            Some("面试")
+        );
         assert_eq!(
             interview
                 .plan

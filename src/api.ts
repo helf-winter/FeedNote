@@ -204,6 +204,7 @@ export interface PlanItem {
   updatedAt: number;
   remindedAt?: number;
   reminderMinutesBefore: number;
+  tag?: string;
 }
 
 export interface UpdatePlanInput {
@@ -214,6 +215,7 @@ export interface UpdatePlanInput {
   notes?: string;
   scheduledAt?: number;
   reminderMinutesBefore: number;
+  tag?: string;
 }
 
 export interface CaptureCommitResult {

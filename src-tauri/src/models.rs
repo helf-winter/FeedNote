@@ -321,6 +321,8 @@ pub struct PlanProposal {
     pub clarification_question: Option<String>,
     #[serde(default = "default_plan_reminder_minutes_before")]
     pub reminder_minutes_before: u32,
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 pub const fn default_plan_reminder_minutes_before() -> u32 {
@@ -378,6 +380,7 @@ pub struct PlanItem {
     pub reminded_at: Option<i64>,
     pub feishu_synced_at: Option<i64>,
     pub reminder_minutes_before: u32,
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,6 +393,7 @@ pub struct UpdatePlanInput {
     pub notes: Option<String>,
     pub scheduled_at: Option<i64>,
     pub reminder_minutes_before: u32,
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

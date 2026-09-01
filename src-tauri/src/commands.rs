@@ -1134,6 +1134,7 @@ mod tests {
             needs_clarification: false,
             clarification_question: None,
             reminder_minutes_before: 180,
+            tag: Some("面试".to_string()),
         }
     }
 

@@ -13,6 +13,7 @@ import {
   LoaderCircle,
   NotebookText,
   PanelRightClose,
+  Tag,
 } from "lucide-vue-next";
 import {
   listPlans,
@@ -30,6 +31,7 @@ const DOCK_OPACITY_KEY = "feednote.plan-dock.opacity";
 
 const expanded = ref(false);
 const plans = ref<PlanItem[]>([]);
+const tagFilter = ref<"all" | "面试">("all");
 const loading = ref(false);
 const error = ref("");
 const answers = reactive<Record<string, string>>({});
@@ -39,6 +41,9 @@ const dropMessage = ref("");
 const dockStyle = computed(() => ({
   "--dock-opacity": String(dockOpacity.value / 100),
 }));
+const visiblePlans = computed(() =>
+  tagFilter.value === "all" ? plans.value : plans.value.filter((plan) => plan.tag === tagFilter.value),
+);
 let unlisten: UnlistenFn | undefined;
 let collapsedPointer: { id: number; x: number; y: number } | undefined;
 let dragDepth = 0;
@@ -277,7 +282,7 @@ function formatTime(timestamp?: number): string {
         <div class="dock-heading-content">
           <div class="dock-title-row">
             <span>桌面计划</span>
-            <strong>{{ plans.length }}</strong>
+            <strong>{{ visiblePlans.length }}</strong>
           </div>
           <label class="dock-opacity-control" title="调节面板透明度" @mousedown.stop>
             <Droplet :size="11" aria-hidden="true" />
@@ -304,12 +309,17 @@ function formatTime(timestamp?: number): string {
       </nav>
     </header>
 
+    <div class="dock-tag-filter" role="group" aria-label="按标签筛选计划">
+      <button type="button" :class="{ active: tagFilter === 'all' }" @click="tagFilter = 'all'">全部</button>
+      <button type="button" :class="{ active: tagFilter === '面试' }" @click="tagFilter = '面试'">面试</button>
+    </div>
+
     <div class="plan-list">
-      <div v-if="!plans.length" class="empty-plans">
+      <div v-if="!visiblePlans.length" class="empty-plans">
         <span><CalendarClock :size="25" /></span>
-        <p>暂无待办计划</p>
+        <p>{{ tagFilter === '面试' ? '暂无面试计划' : '暂无待办计划' }}</p>
       </div>
-      <article v-for="plan in plans" :key="plan.id" class="plan-card">
+      <article v-for="plan in visiblePlans" :key="plan.id" class="plan-card">
         <button
           class="complete-plan"
           type="button"
@@ -320,7 +330,7 @@ function formatTime(timestamp?: number): string {
           <Check :size="14" />
         </button>
         <div class="plan-card-body">
-          <time :class="{ pending: !plan.scheduledAt }">{{ formatTime(plan.scheduledAt) }}</time>
+          <div class="dock-plan-meta"><time :class="{ pending: !plan.scheduledAt }">{{ formatTime(plan.scheduledAt) }}</time><span v-if="plan.tag"><Tag :size="10" />{{ plan.tag }}</span></div>
           <h2>{{ plan.title }}</h2>
           <div class="plan-fields">
             <div class="plan-field">

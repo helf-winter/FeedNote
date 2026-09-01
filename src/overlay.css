@@ -386,7 +386,7 @@
 
   position: relative;
   display: grid;
-  grid-template-rows: 66px minmax(0, 1fr);
+  grid-template-rows: 66px 38px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -520,6 +520,37 @@
   cursor: default;
 }
 
+.dock-tag-filter {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 5px 12px;
+  gap: 4px;
+  background: rgb(255 255 255 / calc(var(--dock-opacity) * 0.34));
+  border-bottom: 1px solid rgb(188 201 193 / 55%);
+}
+
+.dock-tag-filter button {
+  height: 27px;
+  padding: 0 9px;
+  color: #68736c;
+  font-size: 10px;
+  font-weight: 650;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+}
+
+.dock-tag-filter button:hover {
+  color: #225e56;
+  background: rgb(31 126 117 / 7%);
+}
+
+.dock-tag-filter button.active {
+  color: #176c64;
+  background: rgb(255 255 255 / calc(var(--dock-opacity) * 0.9));
+  box-shadow: 0 1px 4px rgb(29 41 34 / 10%);
+}
+
 .plan-list {
   min-height: 0;
   padding: 12px;
@@ -580,6 +611,28 @@
 
 .plan-card time.pending {
   color: #b4563b;
+}
+
+.dock-plan-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.dock-plan-meta > span {
+  display: inline-flex;
+  height: 19px;
+  padding: 0 5px;
+  align-items: center;
+  gap: 3px;
+  color: #8a4d24;
+  font-size: 9px;
+  font-weight: 650;
+  background: rgb(255 241 226 / 90%);
+  border: 1px solid rgb(229 191 151 / 72%);
+  border-radius: 4px;
 }
 
 .plan-card h2 {

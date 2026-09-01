@@ -795,6 +795,34 @@ button:disabled {
   font-size: 12px;
 }
 
+.plans-toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-tag-filter {
+  display: inline-flex;
+  height: 36px;
+  padding: 0 8px;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  background: #fff;
+  border: 1px solid #d5dcd8;
+  border-radius: 6px;
+}
+
+.plan-tag-filter select {
+  min-width: 82px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  background: transparent;
+  border: 0;
+  outline: 0;
+}
+
 .plan-view-control {
   display: inline-grid;
   grid-template-columns: repeat(2, 1fr);
@@ -860,6 +888,28 @@ button:disabled {
 
 .main-plan-head > div {
   min-width: 0;
+}
+
+.main-plan-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plan-tag {
+  display: inline-flex;
+  min-height: 22px;
+  padding: 0 7px;
+  align-items: center;
+  gap: 4px;
+  color: #8a4d24;
+  font-size: 11px;
+  font-weight: 650;
+  background: #fff4e8;
+  border: 1px solid #efd5b9;
+  border-radius: 5px;
 }
 
 .plan-schedule {
@@ -1201,6 +1251,7 @@ button:disabled {
 .secret-edit-grid textarea,
 .plan-edit-grid input,
 .plan-edit-grid textarea,
+.plan-edit-grid select,
 .delete-password-field input {
   width: 100%;
   padding: 9px 10px;
@@ -1214,6 +1265,7 @@ button:disabled {
 
 .secret-edit-grid input,
 .plan-edit-grid input,
+.plan-edit-grid select,
 .delete-password-field input {
   height: 39px;
 }
@@ -1229,6 +1281,7 @@ button:disabled {
 .secret-edit-grid textarea:focus,
 .plan-edit-grid input:focus,
 .plan-edit-grid textarea:focus,
+.plan-edit-grid select:focus,
 .delete-password-field input:focus {
   border-color: #68537e;
   box-shadow: 0 0 0 3px rgb(104 83 126 / 10%);
