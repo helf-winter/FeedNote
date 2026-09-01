@@ -2,13 +2,16 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $secretsPath = Join-Path $root "data\secrets.env"
-$secureKey = Read-Host "DeepSeek API Key" -AsSecureString
+$secureKey = Read-Host "Paste the DeepSeek API Key from the DeepSeek console (do not enter this script command)" -AsSecureString
 $keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
 
 try {
     $apiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
-    if ([string]::IsNullOrWhiteSpace($apiKey) -or $apiKey.Trim().Length -lt 10) {
-        throw "DeepSeek API Key is invalid."
+    $normalizedKey = $apiKey.Trim()
+    $looksLikeCommand = $normalizedKey -match '[\\/]' -or $normalizedKey -match '^\.\\' -or $normalizedKey -match '\.ps1$'
+    $hasInvalidCharacters = $normalizedKey -notmatch '^[A-Za-z0-9._-]+$'
+    if ([string]::IsNullOrWhiteSpace($normalizedKey) -or $normalizedKey.Length -lt 20 -or $looksLikeCommand -or $hasInvalidCharacters) {
+        throw "Invalid DeepSeek API Key. Paste the key generated in the DeepSeek console, not .\scripts\configure-deepseek.ps1."
     }
 
     $lines = if (Test-Path -LiteralPath $secretsPath) {
@@ -20,7 +23,7 @@ try {
     $updated = [Collections.Generic.List[string]]::new()
     foreach ($line in $filtered) { $updated.Add($line) }
     if ($updated.Count -gt 0 -and $updated[$updated.Count - 1] -ne "") { $updated.Add("") }
-    $updated.Add("DEEPSEEK_API_KEY=$($apiKey.Trim())")
+    $updated.Add("DEEPSEEK_API_KEY=$normalizedKey")
 
     [IO.Directory]::CreateDirectory((Split-Path -Parent $secretsPath)) | Out-Null
     [IO.File]::WriteAllLines($secretsPath, $updated, [Text.UTF8Encoding]::new($false))

@@ -96,7 +96,7 @@ data\secrets.env
 DEEPSEEK_API_KEY=
 ```
 
-LLM 地址和模型使用应用内默认值 `https://api.deepseek.com/anthropic` 与 `deepseek-v4-flash`。它使用非思考模式处理分类、路由和时间提取；若要单独指定更轻量的路由模型，可添加 `DEEPSEEK_SMALL_FAST_MODEL=`。可运行 `./scripts/configure-deepseek.ps1` 安全写入 Key，脚本不会回显密钥。Embedding 仍独立使用智谱 `embedding-3`、512 维且只读取 `EMBEDDING_API_KEY`，绝不向智谱发送 DeepSeek Key；没有可用 Embedding 凭证或额度时自动回退本地 FTS5。
+LLM 地址和模型使用应用内默认值 `https://api.deepseek.com/anthropic` 与 `deepseek-v4-flash`。它使用非思考模式处理分类、路由和时间提取；若要单独指定更轻量的路由模型，可添加 `DEEPSEEK_SMALL_FAST_MODEL=`。可运行 `./scripts/configure-deepseek.ps1` 安全写入 Key；命令执行后，在隐藏输入提示中粘贴 DeepSeek 控制台生成的真实 API Key，而不是再次输入脚本命令。脚本不会回显密钥，并拒绝路径、命令和格式异常的值。Embedding 仍独立使用智谱 `embedding-3`、512 维且只读取 `EMBEDDING_API_KEY`，绝不向智谱发送 DeepSeek Key；没有可用 Embedding 凭证或额度时自动回退本地 FTS5。
 
 未来本地小模型通过 Provider 接口接入；原始数据结构和 Memory Engine 不与 DeepSeek 绑定。
 
