@@ -658,6 +658,98 @@ impl Database {
         Ok(Some(plan))
     }
 
+    pub fn apply_remote_plan_task_update(
+        &self,
+        plan_id: &str,
+        title: Option<&str>,
+        scheduled_at: Option<i64>,
+        completed: bool,
+        expected_updated_at: i64,
+    ) -> AppResult<Option<PlanItem>> {
+        let title = optional_trimmed(title);
+        if title.is_some_and(|value| value.chars().count() > 80) {
+            return Err(AppError::Validation(
+                "飞书任务标题不能超过 80 字".to_string(),
+            ));
+        }
+        if scheduled_at.is_some_and(|value| value <= 0) {
+            return Err(AppError::Validation("飞书任务时间无效".to_string()));
+        }
+
+        let mut connection = self.connection.lock().expect("database lock poisoned");
+        let transaction = connection.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT id, feed_event_id, title, details, content, link_url, notes,
+                        scheduled_at, status, clarification_question, source_title,
+                        created_at, updated_at, reminded_at, feishu_synced_at
+                 FROM plans WHERE id = ?1",
+                [plan_id],
+                map_plan,
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        if current.updated_at != expected_updated_at {
+            return Ok(None);
+        }
+
+        let next_title = title.unwrap_or(&current.title);
+        let next_scheduled_at = scheduled_at.or(current.scheduled_at);
+        let next_status = if completed {
+            "done"
+        } else if next_scheduled_at.is_some() {
+            "scheduled"
+        } else {
+            "needs_clarification"
+        };
+        let title_changed = next_title != current.title;
+        let time_changed = next_scheduled_at != current.scheduled_at;
+        let status_changed = next_status != current.status;
+        if !title_changed && !time_changed && !status_changed {
+            return Ok(None);
+        }
+
+        let clarification_question =
+            (next_status == "needs_clarification").then_some("请补充计划的具体日期和时间。");
+        let reopened = current.status == "done" && next_status != "done";
+        let now = Utc::now()
+            .timestamp_millis()
+            .max(expected_updated_at.saturating_add(1));
+        let changed = transaction.execute(
+            "UPDATE plans
+             SET title = ?2, scheduled_at = ?3, status = ?4, clarification_question = ?5,
+                 updated_at = ?6,
+                 reminded_at = CASE WHEN ?7 = 1 OR ?8 = 1 THEN NULL ELSE reminded_at END
+             WHERE id = ?1 AND updated_at = ?9",
+            params![
+                plan_id,
+                next_title,
+                next_scheduled_at,
+                next_status,
+                clarification_question,
+                now,
+                time_changed,
+                reopened,
+                expected_updated_at,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let updated = transaction.query_row(
+            "SELECT id, feed_event_id, title, details, content, link_url, notes,
+                    scheduled_at, status, clarification_question, source_title,
+                    created_at, updated_at, reminded_at, feishu_synced_at
+             FROM plans WHERE id = ?1",
+            [plan_id],
+            map_plan,
+        )?;
+        transaction.commit()?;
+        Ok(Some(updated))
+    }
+
     pub fn list_due_plan_reminders(&self, now: i64, due_at: i64) -> AppResult<Vec<PlanItem>> {
         let connection = self.connection.lock().expect("database lock poisoned");
         let mut statement = connection.prepare(
@@ -2762,6 +2854,91 @@ mod tests {
             .feishu_synced_at
             .is_some_and(|value| value < task_done.updated_at));
         assert_eq!(database.list_pending_feishu_plans(20).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remote_feishu_task_updates_title_time_and_status_without_overwriting_details() {
+        let database = Database::in_memory().unwrap();
+        let feed = database
+            .create_selection_feed("AI 面试", "明天上午参加 AI 面试", "测试")
+            .unwrap();
+        let plan = database
+            .create_plan(
+                &feed.feed_id,
+                &plan_proposal(false),
+                Some(1_788_134_400_000),
+                "测试",
+            )
+            .unwrap();
+        database
+            .mark_plan_feishu_synced(&plan.id, plan.updated_at)
+            .unwrap();
+        database
+            .mark_plan_reminded(&plan.id, 1_788_133_000_000)
+            .unwrap();
+
+        let remote = database
+            .apply_remote_plan_task_update(
+                &plan.id,
+                Some("飞书改期后的 AI 面试"),
+                Some(1_788_165_000_000),
+                true,
+                plan.updated_at,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(remote.id, plan.id);
+        assert_eq!(remote.title, "飞书改期后的 AI 面试");
+        assert_eq!(remote.scheduled_at, Some(1_788_165_000_000));
+        assert_eq!(remote.status, "done");
+        assert_eq!(remote.details, plan.details);
+        assert_eq!(remote.content, plan.content);
+        assert_eq!(remote.link_url, plan.link_url);
+        assert_eq!(remote.notes, plan.notes);
+        assert!(remote.reminded_at.is_none());
+        assert!(remote
+            .feishu_synced_at
+            .is_some_and(|value| value < remote.updated_at));
+
+        let reopened = database
+            .apply_remote_plan_task_update(
+                &plan.id,
+                Some(&remote.title),
+                remote.scheduled_at,
+                false,
+                remote.updated_at,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.status, "scheduled");
+
+        let locally_edited = database
+            .update_plan(
+                &plan.id,
+                &UpdatePlanInput {
+                    title: "本地更新优先".to_string(),
+                    details: reopened.details.clone(),
+                    content: reopened.content.clone(),
+                    link_url: reopened.link_url.clone(),
+                    notes: reopened.notes.clone(),
+                    scheduled_at: reopened.scheduled_at,
+                },
+            )
+            .unwrap();
+        assert!(database
+            .apply_remote_plan_task_update(
+                &plan.id,
+                Some("过期的飞书标题"),
+                Some(1_788_166_000_000),
+                false,
+                reopened.updated_at,
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            database.get_plan(&plan.id).unwrap().title,
+            locally_edited.title
+        );
     }
 
     #[test]

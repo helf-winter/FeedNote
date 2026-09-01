@@ -933,6 +933,8 @@ async fn sync_plan_tasks(
 
 struct RemoteTaskStatus {
     completed: bool,
+    title: Option<String>,
+    scheduled_at: Option<i64>,
     task_url: Option<String>,
 }
 
@@ -957,7 +959,14 @@ async fn pull_plan_task_statuses(
         }
         let remote = read_task_status(client, token, user_id_type, &mapping.task_guid).await?;
         let local_completed = plan.status == "done";
-        if remote.completed == local_completed {
+        let remote_title_changed = remote
+            .title
+            .as_deref()
+            .is_some_and(|title| title != plan.title);
+        let remote_time_changed = remote
+            .scheduled_at
+            .is_some_and(|scheduled_at| Some(scheduled_at) != plan.scheduled_at);
+        if remote.completed == local_completed && !remote_title_changed && !remote_time_changed {
             if mapping.completed != remote.completed || mapping.plan_updated_at < plan.updated_at {
                 database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
                     plan_id: plan.id.clone(),
@@ -969,11 +978,12 @@ async fn pull_plan_task_statuses(
             }
             continue;
         }
-        if let Some(updated) = database.apply_remote_plan_done(
+        if let Some(updated) = database.apply_remote_plan_task_update(
             &plan.id,
+            remote.title.as_deref(),
+            remote.scheduled_at,
             remote.completed,
             plan.updated_at,
-            "feishu_task",
         )? {
             database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
                 plan_id: plan.id.clone(),
@@ -1004,10 +1014,38 @@ async fn read_task_status(
         .map_err(network_error)?;
     let payload = checked_json(response).await?;
     let task = &payload["data"]["task"];
-    Ok(RemoteTaskStatus {
+    Ok(parse_remote_task(task))
+}
+
+fn parse_remote_task(task: &Value) -> RemoteTaskStatus {
+    RemoteTaskStatus {
         completed: task_completed(task),
+        title: task["summary"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.chars().count() <= 80)
+            .map(str::to_string),
+        scheduled_at: task_time(&task["start"]).or_else(|| task_time(&task["due"])),
         task_url: task["url"].as_str().map(str::to_string),
-    })
+    }
+}
+
+fn task_time(value: &Value) -> Option<i64> {
+    if value["is_all_day"].as_bool() == Some(true) {
+        return None;
+    }
+    let timestamp = value["timestamp"]
+        .as_str()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .or_else(|| value["timestamp"].as_i64())?;
+    let timestamp = if timestamp < 100_000_000_000 {
+        timestamp.checked_mul(1_000)?
+    } else {
+        timestamp
+    };
+    (946_684_800_000..=4_102_444_800_000)
+        .contains(&timestamp)
+        .then_some(timestamp)
 }
 
 fn task_completed(task: &Value) -> bool {
@@ -2265,5 +2303,34 @@ mod tests {
             "completed_at": "0"
         })));
         assert!(!TASK_UPDATE_FIELDS.contains(&"reminders"));
+    }
+
+    #[test]
+    fn parses_feishu_task_title_and_start_time() {
+        let task = parse_remote_task(&json!({
+            "summary": "  飞书改期后的面试  ",
+            "status": "todo",
+            "completed_at": "0",
+            "start": { "timestamp": "1788168600000", "is_all_day": false },
+            "due": { "timestamp": "1788170400000", "is_all_day": false },
+            "url": "https://applink.feishu.cn/task/example"
+        }));
+        assert_eq!(task.title.as_deref(), Some("飞书改期后的面试"));
+        assert_eq!(task.scheduled_at, Some(1_788_168_600_000));
+        assert!(!task.completed);
+        assert_eq!(
+            task.task_url.as_deref(),
+            Some("https://applink.feishu.cn/task/example")
+        );
+
+        let all_day = parse_remote_task(&json!({
+            "summary": "全天任务",
+            "start": { "timestamp": "1788163200000", "is_all_day": true }
+        }));
+        assert!(all_day.scheduled_at.is_none());
+        assert_eq!(
+            task_time(&json!({ "timestamp": "1788168600" })),
+            Some(1_788_168_600_000)
+        );
     }
 }

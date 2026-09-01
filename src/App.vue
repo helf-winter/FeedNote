@@ -1394,7 +1394,7 @@ function typeLabel(type: string): string {
 
         <div class="settings-section">
           <div class="settings-heading">
-            <div><h2>飞书待办提醒</h2><p>创建个人飞书任务，双向同步完成状态，并在开始前 3 小时提醒。</p></div>
+            <div><h2>飞书待办提醒</h2><p>创建个人飞书任务，双向同步标题、时间和完成状态，并在开始前 3 小时提醒。</p></div>
             <label class="toggle-control">
               <input v-model="settings.feishuTaskRemindersEnabled" type="checkbox" />
               <span aria-hidden="true" />
@@ -1467,7 +1467,7 @@ function typeLabel(type: string): string {
             <li><Smartphone :size="14" />手机推送默认关闭，只发送计划卡片字段，不发送原文和周边上下文。</li>
             <li><Cloud :size="14" />三个飞书通道独立开关；计划表只回读已有计划的完成状态，投递表绝不反向生成计划。</li>
             <li><CircleAlert :size="14" />秘密表只做 FeedNote 到飞书的单向写入；启用后秘密值在飞书中是明文，安全边界由飞书账号和文档权限承担。</li>
-            <li><Clock3 :size="14" />飞书待办只双向同步已有任务的完成状态，并固定提前 3 小时提醒。</li>
+            <li><Clock3 :size="14" />飞书待办只回读已有任务的标题、精确开始时间和完成状态，并固定提前 3 小时提醒。</li>
           </ul>
         </div>
       </section>
