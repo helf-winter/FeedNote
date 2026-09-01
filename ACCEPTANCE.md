@@ -13,7 +13,7 @@ D:\code\创业\桌面日记\data\feednote.db
 1. 在收集箱输入一段文字，按 `Ctrl + Enter`，确认记录立即出现在时间线。
 2. 打开“记忆”，搜索刚才输入的关键词，确认能找到对应记忆。
 3. 点击一条记录，查看当前理解、原始来源和版本时间线。
-4. 在“设置”中测试连接，确认显示 `glm-5.3` 正常，并提示 Embedding 回退本地全文检索。
+4. 运行 `./scripts/configure-deepseek.ps1` 写入 Key，在“设置”中测试连接，确认显示 `deepseek-v4-flash` 正常，并在 Embedding 无凭证或额度时提示回退本地全文检索。
 5. 尝试永久删除，确认必须经过二次确认；取消时数据不变。
 6. 在“设置”中导出 JSON，检查原始记录和当前记忆均在导出文件中。
 7. 按 `Alt + Shift + Space`，确认 FeedNote 窗口被唤起并获得焦点。
@@ -64,7 +64,7 @@ D:\code\创业\桌面日记\data\feednote.db
 - 原始事件与结构化记忆双层模型；
 - 原始记录、记忆版本、来源、处理运行、审核项和审计日志；
 - 快速输入、时间线、全文搜索、类型筛选和记忆详情；
-- 智谱 Anthropic Provider、结构化输出校验和安全降级；
+- DeepSeek Anthropic Provider、`deepseek-v4-flash` 非思考模式、结构化输出校验和安全降级；
 - 分类、标题和摘要自动落库，并保留原始版本；
 - 自动判断新建、更新已有记忆或建立记忆关联；
 - 更新已有记忆时继承全部来源，删除来源时从剩余原文安全重建；
@@ -94,8 +94,8 @@ D:\code\创业\桌面日记\data\feednote.db
 
 ```text
 前端测试：11 passed
-Rust 领域测试：52 passed，3 个在线测试默认 ignored
-智谱在线 Provider 测试：3 passed（结构化分类、同主题自动更新、双表路由与精确计划时间）
+Rust 领域测试：53 passed，3 个在线测试默认 ignored
+DeepSeek 在线 Provider 测试：需配置 `DEEPSEEK_API_KEY` 后单独运行（结构化分类、同主题自动更新、双表路由与精确计划时间）
 TypeScript 检查：passed
 Vite production build：passed
 Tauri release build：passed
@@ -113,7 +113,7 @@ Rust 测试覆盖：原始来源不可变、自动分类、已有记忆更新、
 - 未安装本地 LLM；未来通过同一 Provider 边界接入小模型。
 - 未修改系统或其他软件的右键菜单；当前入口是独立的选区圆点。
 - 未实现剪贴板监听、OCR、目录扫描或对不支持 UI Automation 的软件进行强制读取。
-- 智谱 Embedding 身份校验通过，但当前账号无通用额度，运行时自动使用 SQLite 全文搜索。
+- 智谱 Embedding 保持独立可选配置；无凭证或额度时运行时自动使用 SQLite 全文搜索，DeepSeek Key 不会发送到智谱。
 - 未实现完整多设备数据同步、手机端编辑和附件 OCR；当前手机能力是单向计划提醒。
 - 未实现整个数据库的静态加密；普通投喂、记忆和计划仍依赖本机账户与目录权限，秘密记录已单独加密。
 - 未实现导入和自动备份轮转；本轮只提供显式 JSON 导出。

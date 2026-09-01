@@ -8,7 +8,7 @@ FeedNote 是一个本地持久化、可追溯的个人记忆系统。它先可�
 - 独立“备忘录”区域：选中文字后选择“记”，原文立即本地保存并单向追加到独立飞书表格；
 - SQLite 本地持久化与全文搜索；
 - 记忆类型、来源和版本时间线；
-- 智谱 `glm-5.3` 自动分类、标题和摘要；
+- DeepSeek `deepseek-v4-flash` 自动分类、标题和摘要，默认关闭思考模式；
 - 自动判断新建、更新已有记忆或建立关联，更新始终创建新版本；
 - Embedding 不可用时自动回退 SQLite 全文检索；
 - 指代不明或关键上下文缺失时进入待澄清区；
@@ -84,7 +84,7 @@ data/secrets.env     本机密钥，不进入数据库或导出
 
 ## 模型配置
 
-基础记录、搜索、导出不依赖模型。当前默认使用智谱 Anthropic 兼容接口，密钥只从下面的文件读取：
+基础记录、搜索、导出不依赖模型。当前默认使用 DeepSeek Anthropic 兼容接口，密钥只从下面的文件读取：
 
 ```text
 data\secrets.env
@@ -93,12 +93,12 @@ data\secrets.env
 最小配置：
 
 ```env
-ANTHROPIC_AUTH_TOKEN=
+DEEPSEEK_API_KEY=
 ```
 
-LLM 地址和模型使用应用内默认值 `https://open.bigmodel.cn/api/anthropic` 与 `glm-5.3`。若后续有确认更快且兼容结构化输出的模型，可在同一文件添加 `ANTHROPIC_SMALL_FAST_MODEL=`，仅让选区路由使用它；未填写时继续使用主模型。Embedding 默认使用 `embedding-3`、512 维；若需独立密钥，可添加 `EMBEDDING_API_KEY=`。目前账号没有 Embedding 通用额度时，应用会自动使用本地 FTS5 检索，不影响分类。
+LLM 地址和模型使用应用内默认值 `https://api.deepseek.com/anthropic` 与 `deepseek-v4-flash`。它使用非思考模式处理分类、路由和时间提取；若要单独指定更轻量的路由模型，可添加 `DEEPSEEK_SMALL_FAST_MODEL=`。可运行 `./scripts/configure-deepseek.ps1` 安全写入 Key，脚本不会回显密钥。Embedding 仍独立使用智谱 `embedding-3`、512 维且只读取 `EMBEDDING_API_KEY`，绝不向智谱发送 DeepSeek Key；没有可用 Embedding 凭证或额度时自动回退本地 FTS5。
 
-未来本地小模型通过 Provider 接口接入；原始数据结构和 Memory Engine 不与智谱绑定。
+未来本地小模型通过 Provider 接口接入；原始数据结构和 Memory Engine 不与 DeepSeek 绑定。
 
 ## 手机提醒配置
 

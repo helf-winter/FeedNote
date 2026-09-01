@@ -11,6 +11,7 @@ use crate::{
         AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, EncryptedSecretRecord,
         FeedEvent, FeishuPlanTaskMapping, FeishuSheetState, MemoItem, MemoryDetail, MemorySummary,
         MemoryVersion, PlanItem, PlanProposal, ReviewItem, Stats, UpdatePlanInput, VaultMeta,
+        DEFAULT_LLM_ENDPOINT, DEFAULT_LLM_MODEL,
     },
 };
 
@@ -1555,7 +1556,17 @@ impl Database {
             })
             .optional()?;
         match settings_json {
-            Some(value) => Ok(serde_json::from_str(&value).unwrap_or_default()),
+            Some(value) => {
+                let settings = serde_json::from_str(&value).unwrap_or_default();
+                let (settings, migrated) = migrate_legacy_llm_settings(settings);
+                if migrated {
+                    connection.execute(
+                        "UPDATE settings SET value = ?1 WHERE key = 'app'",
+                        [serde_json::to_string(&settings)?],
+                    )?;
+                }
+                Ok(settings)
+            }
             None => Ok(AppSettings::default()),
         }
     }
@@ -2505,13 +2516,27 @@ pub fn validate_llm_endpoint(endpoint: &str) -> AppResult<()> {
         || normalized.starts_with("http://localhost:")
         || normalized == "http://127.0.0.1"
         || normalized == "http://localhost";
-    let authorized_cloud = normalized == "https://open.bigmodel.cn/api/anthropic";
+    let authorized_cloud = normalized == DEFAULT_LLM_ENDPOINT;
     if !local && !authorized_cloud {
         return Err(AppError::Validation(
-            "只允许连接已授权的智谱 Anthropic 地址或本机模型服务".to_string(),
+            "只允许连接已授权的 DeepSeek Anthropic 地址或本机模型服务".to_string(),
         ));
     }
     Ok(())
+}
+
+fn migrate_legacy_llm_settings(mut settings: AppSettings) -> (AppSettings, bool) {
+    let legacy_endpoint = settings.llm_endpoint.trim().trim_end_matches('/')
+        == "https://open.bigmodel.cn/api/anthropic";
+    let legacy_model = settings.llm_endpoint.trim().trim_end_matches('/') == DEFAULT_LLM_ENDPOINT
+        && settings.llm_model.trim().starts_with("glm-");
+    if legacy_endpoint || legacy_model {
+        settings.llm_endpoint = DEFAULT_LLM_ENDPOINT.to_string();
+        settings.llm_model = DEFAULT_LLM_MODEL.to_string();
+        (settings, true)
+    } else {
+        (settings, false)
+    }
 }
 
 pub fn validate_embedding_endpoint(endpoint: &str) -> AppResult<()> {
@@ -3173,9 +3198,21 @@ mod tests {
     #[test]
     fn endpoint_rejects_unauthorized_hosts() {
         assert!(validate_llm_endpoint("https://example.com").is_err());
-        assert!(validate_llm_endpoint("https://open.bigmodel.cn/api/anthropic").is_ok());
+        assert!(validate_llm_endpoint("https://api.deepseek.com/anthropic").is_ok());
+        assert!(validate_llm_endpoint("https://open.bigmodel.cn/api/anthropic").is_err());
         assert!(validate_llm_endpoint("http://127.0.0.1:11434").is_ok());
         assert!(validate_embedding_endpoint("https://open.bigmodel.cn/api/paas/v4").is_ok());
+    }
+
+    #[test]
+    fn legacy_glm_settings_migrate_to_deepseek_flash() {
+        let mut legacy = AppSettings::default();
+        legacy.llm_endpoint = "https://open.bigmodel.cn/api/anthropic".to_string();
+        legacy.llm_model = "glm-5.3".to_string();
+        let (migrated, changed) = migrate_legacy_llm_settings(legacy);
+        assert!(changed);
+        assert_eq!(migrated.llm_endpoint, DEFAULT_LLM_ENDPOINT);
+        assert_eq!(migrated.llm_model, DEFAULT_LLM_MODEL);
     }
 
     #[test]

@@ -47,7 +47,7 @@ describe("browser preview data adapter", () => {
         aiEnabled: true,
         launchAtLogin: false,
         llmEndpoint: "https://example.com",
-        llmModel: "glm-5.3",
+        llmModel: "deepseek-v4-flash",
         embeddingEndpoint: "https://open.bigmodel.cn/api/paas/v4",
         embeddingModel: "embedding-3",
         embeddingDimensions: 512,

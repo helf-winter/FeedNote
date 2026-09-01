@@ -70,6 +70,9 @@ pub struct Stats {
     pub pending_processing: i64,
 }
 
+pub const DEFAULT_LLM_ENDPOINT: &str = "https://api.deepseek.com/anthropic";
+pub const DEFAULT_LLM_MODEL: &str = "deepseek-v4-flash";
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -96,8 +99,8 @@ impl Default for AppSettings {
         Self {
             launch_at_login: false,
             ai_enabled: true,
-            llm_endpoint: "https://open.bigmodel.cn/api/anthropic".to_string(),
-            llm_model: "glm-5.3".to_string(),
+            llm_endpoint: DEFAULT_LLM_ENDPOINT.to_string(),
+            llm_model: DEFAULT_LLM_MODEL.to_string(),
             embedding_endpoint: "https://open.bigmodel.cn/api/paas/v4".to_string(),
             embedding_model: "embedding-3".to_string(),
             embedding_dimensions: 512,

@@ -133,8 +133,8 @@ const stats = ref<Stats>({ totalFeeds: 0, totalMemories: 0, pendingReviews: 0, p
 const settings = ref<AppSettings>({
   launchAtLogin: false,
   aiEnabled: true,
-  llmEndpoint: "https://open.bigmodel.cn/api/anthropic",
-  llmModel: "glm-5.3",
+  llmEndpoint: "https://api.deepseek.com/anthropic",
+  llmModel: "deepseek-v4-flash",
   embeddingEndpoint: "https://open.bigmodel.cn/api/paas/v4",
   embeddingModel: "embedding-3",
   embeddingDimensions: 512,
@@ -944,7 +944,7 @@ function typeLabel(type: string): string {
           <ShieldCheck :size="16" />
           <div>
             <strong>数据本机保存</strong>
-            <span>{{ settings.aiEnabled ? "智谱云端理解" : "AI 已暂停" }}</span>
+            <span>{{ settings.aiEnabled ? "DeepSeek 云端理解" : "AI 已暂停" }}</span>
           </div>
         </div>
         <span v-if="!isTauri" class="preview-label">浏览器预览</span>

@@ -19,9 +19,11 @@ static EMBEDDING_CLIENT: OnceLock<Client> = OnceLock::new();
 
 #[derive(Debug)]
 pub struct ProviderSecrets {
-    auth_token: String,
+    deepseek_api_key: Option<String>,
+    anthropic_auth_token: Option<String>,
     embedding_api_key: Option<String>,
-    small_fast_model: Option<String>,
+    deepseek_small_fast_model: Option<String>,
+    anthropic_small_fast_model: Option<String>,
 }
 
 impl ProviderSecrets {
@@ -30,38 +32,70 @@ impl ProviderSecrets {
             AppError::AiUnavailable(format!("无法读取 {}：{}", path.display(), error))
         })?;
         let values = parse_env(&content);
-        let auth_token = values
+        let deepseek_api_key = values
+            .get("DEEPSEEK_API_KEY")
+            .filter(|value| !value.trim().is_empty())
+            .cloned();
+        let anthropic_auth_token = values
             .get("ANTHROPIC_AUTH_TOKEN")
             .filter(|value| !value.trim().is_empty())
-            .cloned()
-            .ok_or_else(|| {
-                AppError::AiUnavailable("data\\secrets.env 中缺少 ANTHROPIC_AUTH_TOKEN".to_string())
-            })?;
+            .cloned();
         let embedding_api_key = values
             .get("EMBEDDING_API_KEY")
             .filter(|value| !value.trim().is_empty())
             .cloned();
-        let small_fast_model = values
+        let deepseek_small_fast_model = values
+            .get("DEEPSEEK_SMALL_FAST_MODEL")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let anthropic_small_fast_model = values
             .get("ANTHROPIC_SMALL_FAST_MODEL")
             .map(String::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         Ok(Self {
-            auth_token,
+            deepseek_api_key,
+            anthropic_auth_token,
             embedding_api_key,
-            small_fast_model,
+            deepseek_small_fast_model,
+            anthropic_small_fast_model,
         })
     }
 
-    fn embedding_key(&self) -> &str {
-        self.embedding_api_key
-            .as_deref()
-            .unwrap_or(&self.auth_token)
+    fn llm_key(&self, endpoint: &str) -> AppResult<&str> {
+        if endpoint.trim().trim_end_matches('/') == "https://api.deepseek.com/anthropic" {
+            return self.deepseek_api_key.as_deref().ok_or_else(|| {
+                AppError::AiUnavailable("data\\secrets.env 中缺少 DEEPSEEK_API_KEY".to_string())
+            });
+        }
+        self.anthropic_auth_token.as_deref().ok_or_else(|| {
+            AppError::AiUnavailable(
+                "本机模型需要在 data\\secrets.env 配置 ANTHROPIC_AUTH_TOKEN".to_string(),
+            )
+        })
     }
 
-    fn routing_model<'a>(&'a self, fallback: &'a str) -> &'a str {
-        self.small_fast_model.as_deref().unwrap_or(fallback)
+    fn embedding_key(&self) -> AppResult<&str> {
+        self.embedding_api_key.as_deref().ok_or_else(|| {
+            AppError::AiUnavailable(
+                "智谱 Embedding 需要 EMBEDDING_API_KEY；未配置时将使用本地全文检索".to_string(),
+            )
+        })
+    }
+
+    fn routing_model<'a>(&'a self, endpoint: &str, fallback: &'a str) -> &'a str {
+        if endpoint.trim().trim_end_matches('/') == "https://api.deepseek.com/anthropic" {
+            self.deepseek_small_fast_model
+                .as_deref()
+                .unwrap_or(fallback)
+        } else {
+            self.anthropic_small_fast_model
+                .as_deref()
+                .unwrap_or(fallback)
+        }
     }
 }
 
@@ -161,7 +195,7 @@ pub async fn route_capture(
     let response = send_message_with_model(
         settings,
         secrets,
-        secrets.routing_model(&settings.llm_model),
+        secrets.routing_model(&settings.llm_endpoint, &settings.llm_model),
         "你是 FeedNote 的谨慎路由器。你只返回结构化建议，应用会校验后决定本地建计划、写入用户指定的投递表或仅保存记忆。",
         &user_prompt,
         768,
@@ -300,7 +334,7 @@ pub async fn enrich_secret_metadata(
     let response = send_message_with_model(
         settings,
         secrets,
-        secrets.routing_model(&settings.llm_model),
+        secrets.routing_model(&settings.llm_endpoint, &settings.llm_model),
         "你是秘密条目的元数据整理器。秘密值已在本地删除，你不能推断或索取它，只能整理非秘密描述信息。",
         &user_prompt,
         512,
@@ -426,10 +460,11 @@ async fn send_message_with_model(
         "{}/v1/messages",
         settings.llm_endpoint.trim_end_matches('/')
     );
+    let auth_token = secrets.llm_key(&settings.llm_endpoint)?;
     let response = client(Duration::from_secs(90))?
         .post(endpoint)
-        .bearer_auth(&secrets.auth_token)
-        .header("x-api-key", &secrets.auth_token)
+        .bearer_auth(auth_token)
+        .header("x-api-key", auth_token)
         .header("anthropic-version", "2023-06-01")
         .json(&json!({
             "model": model,
@@ -446,7 +481,7 @@ async fn send_message_with_model(
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
         return Err(AppError::AiUnavailable(format!(
-            "智谱 Anthropic 接口返回 {status}：{}",
+            "模型接口返回 {status}：{}",
             truncate(&detail, 300)
         )));
     }
@@ -464,7 +499,7 @@ async fn check_embedding(settings: &AppSettings, secrets: &ProviderSecrets) -> A
     );
     let response = client(Duration::from_secs(20))?
         .post(endpoint)
-        .bearer_auth(secrets.embedding_key())
+        .bearer_auth(secrets.embedding_key()?)
         .json(&json!({
             "model": settings.embedding_model,
             "input": "FeedNote connection test",
@@ -527,9 +562,9 @@ fn extract_json_object(value: &str) -> AppResult<&str> {
 
 fn clean_network_error(error: &reqwest::Error) -> String {
     if error.is_connect() {
-        "无法连接智谱服务，请检查网络".to_string()
+        "无法连接模型服务，请检查网络".to_string()
     } else if error.is_timeout() {
-        "智谱服务响应超时".to_string()
+        "模型服务响应超时".to_string()
     } else {
         error.to_string()
     }
@@ -545,14 +580,26 @@ mod tests {
 
     #[test]
     fn parses_env_without_exposing_values() {
-        let values = parse_env("# comment\nANTHROPIC_AUTH_TOKEN='secret.value'\n");
-        assert_eq!(values.get("ANTHROPIC_AUTH_TOKEN").unwrap(), "secret.value");
+        let values = parse_env("# comment\nDEEPSEEK_API_KEY='secret.value'\n");
+        assert_eq!(values.get("DEEPSEEK_API_KEY").unwrap(), "secret.value");
         let secrets = ProviderSecrets {
-            auth_token: "secret.value".to_string(),
+            deepseek_api_key: Some("secret.value".to_string()),
+            anthropic_auth_token: Some("legacy.value".to_string()),
             embedding_api_key: None,
-            small_fast_model: Some("glm-5.2".to_string()),
+            deepseek_small_fast_model: Some("deepseek-v4-flash".to_string()),
+            anthropic_small_fast_model: Some("local-fast".to_string()),
         };
-        assert_eq!(secrets.routing_model("glm-5.3"), "glm-5.2");
+        assert_eq!(
+            secrets
+                .llm_key("https://api.deepseek.com/anthropic")
+                .unwrap(),
+            "secret.value"
+        );
+        assert_eq!(
+            secrets.routing_model("https://api.deepseek.com/anthropic", "deepseek-v4-pro"),
+            "deepseek-v4-flash"
+        );
+        assert!(secrets.embedding_key().is_err());
     }
 
     #[test]

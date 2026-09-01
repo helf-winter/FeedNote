@@ -300,7 +300,7 @@ function initialMockState(): MockState {
           title: "FeedNote 首轮开发顺序",
           summary: "先实现快捷输入和全文搜索，系统右键能力延后。",
           confidence: 0.46,
-          model: "glm-5.3",
+          model: "deepseek-v4-flash",
           question: "这里的“明天”具体是几月几日？",
         },
         createdAt: now - 1000 * 60 * 72,
@@ -309,8 +309,8 @@ function initialMockState(): MockState {
     settings: {
       launchAtLogin: false,
       aiEnabled: true,
-      llmEndpoint: "https://open.bigmodel.cn/api/anthropic",
-      llmModel: "glm-5.3",
+      llmEndpoint: "https://api.deepseek.com/anthropic",
+      llmModel: "deepseek-v4-flash",
       embeddingEndpoint: "https://open.bigmodel.cn/api/paas/v4",
       embeddingModel: "embedding-3",
       embeddingDimensions: 512,
@@ -418,7 +418,7 @@ export async function getMemory(memoryId: string): Promise<MemoryDetail> {
         summary: memory.summary,
         confidence: memory.confidence,
         authorType: memory.authorType,
-        modelInfo: memory.authorType === "ai" ? "glm-5.3" : undefined,
+        modelInfo: memory.authorType === "ai" ? "deepseek-v4-flash" : undefined,
         changeReason: memory.authorType === "ai" ? "AI 自动分类与整理" : "原始投喂",
         createdAt: memory.updatedAt,
         sourceEventIds: getMock().feeds.filter((feed) => feed.memoryId === memory.id).map((feed) => feed.id),
@@ -494,8 +494,8 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
   const llmEndpoint = settings.llmEndpoint.replace(/\/$/, "");
   const embeddingEndpoint = settings.embeddingEndpoint.replace(/\/$/, "");
   const local = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
-  if (llmEndpoint !== "https://open.bigmodel.cn/api/anthropic" && !local.test(llmEndpoint)) {
-    throw new Error("只允许连接已授权的智谱 Anthropic 地址或本机模型服务");
+  if (llmEndpoint !== "https://api.deepseek.com/anthropic" && !local.test(llmEndpoint)) {
+    throw new Error("只允许连接已授权的 DeepSeek Anthropic 地址或本机模型服务");
   }
   if (embeddingEndpoint !== "https://open.bigmodel.cn/api/paas/v4" && !local.test(embeddingEndpoint)) {
     throw new Error("只允许连接已授权的智谱 Embedding 地址或本机服务");
