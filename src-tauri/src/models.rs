@@ -309,7 +309,9 @@ pub struct AiProposal {
 #[serde(rename_all = "camelCase")]
 pub struct PlanProposal {
     pub title: String,
+    #[serde(default)]
     pub details: String,
+    #[serde(default)]
     pub content: String,
     pub link_url: Option<String>,
     pub notes: Option<String>,
@@ -317,6 +319,12 @@ pub struct PlanProposal {
     pub time_evidence: Option<String>,
     pub needs_clarification: bool,
     pub clarification_question: Option<String>,
+    #[serde(default = "default_plan_reminder_minutes_before")]
+    pub reminder_minutes_before: u32,
+}
+
+pub const fn default_plan_reminder_minutes_before() -> u32 {
+    180
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -369,6 +377,7 @@ pub struct PlanItem {
     pub updated_at: i64,
     pub reminded_at: Option<i64>,
     pub feishu_synced_at: Option<i64>,
+    pub reminder_minutes_before: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,6 +389,7 @@ pub struct UpdatePlanInput {
     pub link_url: Option<String>,
     pub notes: Option<String>,
     pub scheduled_at: Option<i64>,
+    pub reminder_minutes_before: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

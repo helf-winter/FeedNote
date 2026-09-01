@@ -29,7 +29,6 @@ const API_BASE: &str = "https://open.feishu.cn/open-apis";
 const SHEET_TITLE: &str = "FeedNote 计划";
 const MEMO_SHEET_TITLE: &str = "FeedNote 备忘录";
 const SECRET_SHEET_TITLE: &str = "FeedNote 秘密";
-const TASK_REMINDER_MINUTES: i64 = 180;
 const HEADERS: [&str; 9] = [
     "本地计划ID",
     "状态",
@@ -1131,7 +1130,7 @@ async fn create_task(
             "description": task_description(plan),
             "start": { "timestamp": timestamp, "is_all_day": false },
             "due": { "timestamp": timestamp, "is_all_day": false },
-            "reminders": [{ "relative_fire_minute": TASK_REMINDER_MINUTES }],
+            "reminders": [{ "relative_fire_minute": plan.reminder_minutes_before }],
             "members": [{ "id": assignee.id, "type": "user", "role": "assignee" }],
             "client_token": plan.id,
         }))
@@ -1184,7 +1183,82 @@ async fn patch_task(
         .await
         .map_err(network_error)?;
     let payload = checked_json(response).await?;
+    replace_task_reminder(
+        client,
+        token,
+        user_id_type,
+        task_guid,
+        plan.reminder_minutes_before,
+    )
+    .await?;
     Ok(payload["data"]["task"]["url"].as_str().map(str::to_string))
+}
+
+async fn replace_task_reminder(
+    client: &Client,
+    token: &str,
+    user_id_type: &str,
+    task_guid: &str,
+    reminder_minutes_before: u32,
+) -> AppResult<()> {
+    let response = client
+        .get(format!("{API_BASE}/task/v2/tasks/{task_guid}"))
+        .bearer_auth(token)
+        .query(&[("user_id_type", user_id_type)])
+        .send()
+        .await
+        .map_err(network_error)?;
+    let payload = checked_json(response).await?;
+    let reminders = payload["data"]["task"]["reminders"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if task_reminder_matches(&reminders, reminder_minutes_before) {
+        return Ok(());
+    }
+
+    let reminder_ids = task_reminder_ids(&reminders);
+    if !reminder_ids.is_empty() {
+        let response = client
+            .post(format!(
+                "{API_BASE}/task/v2/tasks/{task_guid}/remove_reminders"
+            ))
+            .bearer_auth(token)
+            .query(&[("user_id_type", user_id_type)])
+            .json(&json!({ "reminder_ids": reminder_ids }))
+            .send()
+            .await
+            .map_err(network_error)?;
+        checked_json(response).await?;
+    }
+
+    let response = client
+        .post(format!(
+            "{API_BASE}/task/v2/tasks/{task_guid}/add_reminders"
+        ))
+        .bearer_auth(token)
+        .query(&[("user_id_type", user_id_type)])
+        .json(&json!({
+            "reminders": [{ "relative_fire_minute": reminder_minutes_before }]
+        }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    checked_json(response).await?;
+    Ok(())
+}
+
+fn task_reminder_matches(reminders: &[Value], reminder_minutes_before: u32) -> bool {
+    reminders.iter().any(|reminder| {
+        reminder["relative_fire_minute"].as_u64() == Some(u64::from(reminder_minutes_before))
+    })
+}
+
+fn task_reminder_ids(reminders: &[Value]) -> Vec<&str> {
+    reminders
+        .iter()
+        .filter_map(|reminder| reminder["id"].as_str())
+        .collect()
 }
 
 async fn complete_task(
@@ -2303,6 +2377,17 @@ mod tests {
             "completed_at": "0"
         })));
         assert!(!TASK_UPDATE_FIELDS.contains(&"reminders"));
+    }
+
+    #[test]
+    fn compares_and_extracts_task_reminders() {
+        let reminders = vec![json!({
+            "id": "reminder-1",
+            "relative_fire_minute": 0
+        })];
+        assert!(task_reminder_matches(&reminders, 0));
+        assert!(!task_reminder_matches(&reminders, 180));
+        assert_eq!(task_reminder_ids(&reminders), vec!["reminder-1"]);
     }
 
     #[test]

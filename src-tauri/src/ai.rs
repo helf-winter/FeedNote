@@ -187,8 +187,9 @@ pub async fn route_capture(
          例如：职位详情页通常只写投递记录；‘明天下午三点某公司 AI 面’应同时写投递记录和创建计划；普通知识只进入记忆。\n\n\
          只返回一个 JSON 对象：\n\
          createPlan、planConfidence（0到1）、writeApplicationRecord、applicationConfidence（0到1）、reason；\n\
-         plan 为 null 或对象，字段为 title、details、content、linkUrl、notes、scheduledFor、timeEvidence、needsClarification、clarificationQuestion；\n\
+         plan 为 null 或对象，字段为 title、details、content、linkUrl、notes、scheduledFor、timeEvidence、needsClarification、clarificationQuestion、reminderMinutesBefore；\n\
          plan.title 不超过 80 字，content 必须是一句话且不超过 60 字，notes 不超过 500 字；\n\
+         reminderMinutesBefore 是 0 到 10080 的整数，默认 180。只有用户明确指定提醒时才覆盖默认值：‘准时提醒’、‘到点提醒’、‘提醒时间与任务时间相同’或‘不用提前’填 0；‘提前 N 分钟/小时’换算成分钟；\n\
          applicationRecord 为 null 或对象，字段为 status、company、role、linkUrl、notes。\n\
          不要返回 Markdown。"
     );
@@ -290,14 +291,15 @@ pub async fn resolve_plan_time(
          新计划与 occupied_slots 中任一开始时间至少间隔 60 分钟，不能使用相同时间。没有合适空档时继续询问用户，不得制造冲突。\n\
          保留原计划中已经提取出的链接和注意事项，除非回答提供了更准确的信息。\
          只返回 JSON：title、details、content、linkUrl、notes、scheduledFor（RFC3339，使用 +08:00；仍不完整则 null）、\
-         timeEvidence、needsClarification、clarificationQuestion。若仍缺完整日期或具体时间，继续提出一个具体问题。不要返回 Markdown。",
+         timeEvidence、needsClarification、clarificationQuestion、reminderMinutesBefore。保留原计划的 reminderMinutesBefore，除非回答明确改变提醒提前量。若仍缺完整日期或具体时间，继续提出一个具体问题。不要返回 Markdown。",
         plan.title,
         format!(
-            "{}\n内容：{}\n链接：{}\n注意事项：{}",
+            "{}\n内容：{}\n链接：{}\n注意事项：{}\n提醒提前量：{} 分钟",
             plan.details,
             plan.content,
             plan.link_url.as_deref().unwrap_or("无"),
-            plan.notes.as_deref().unwrap_or("无")
+            plan.notes.as_deref().unwrap_or("无"),
+            plan.reminder_minutes_before
         ),
         answer,
         occupied_slots
@@ -384,6 +386,17 @@ fn parse_plan_response(response: AnthropicResponse) -> AppResult<PlanProposal> {
 
 fn normalize_plan_content(proposal: &mut PlanProposal) {
     proposal.title = proposal.title.trim().chars().take(80).collect();
+    let details: String = proposal.details.trim().chars().take(4_000).collect();
+    proposal.details = if details.is_empty() {
+        let fallback = proposal.content.trim();
+        if fallback.is_empty() {
+            proposal.title.clone()
+        } else {
+            fallback.chars().take(4_000).collect()
+        }
+    } else {
+        details
+    };
     let content = proposal.content.trim();
     let source = if content.is_empty() {
         let from_details = proposal
@@ -634,6 +647,7 @@ mod tests {
             proposal.scheduled_for.as_deref(),
             Some("2026-08-31T09:00:00+08:00")
         );
+        assert_eq!(proposal.reminder_minutes_before, 180);
     }
 
     #[test]
@@ -648,6 +662,7 @@ mod tests {
             time_evidence: Some("上午九点".to_string()),
             needs_clarification: false,
             clarification_question: None,
+            reminder_minutes_before: 180,
         };
         normalize_plan_content(&mut proposal);
         assert_eq!(proposal.content.chars().count(), 60);
@@ -655,6 +670,22 @@ mod tests {
         proposal.content.clear();
         normalize_plan_content(&mut proposal);
         assert_eq!(proposal.content, "参加前端开发工程师面试");
+    }
+
+    #[test]
+    fn fills_missing_plan_details_and_keeps_explicit_on_time_reminder() {
+        let response = AnthropicResponse {
+            content: vec![AnthropicContent {
+                kind: "text".to_string(),
+                text: Some(
+                    r#"{"title":"拿快递","details":"","content":"拿快递","linkUrl":null,"notes":null,"scheduledFor":"2026-09-01T17:20:00+08:00","timeEvidence":"下午5:20","needsClarification":false,"clarificationQuestion":null,"reminderMinutesBefore":0}"#
+                        .to_string(),
+                ),
+            }],
+        };
+        let proposal = parse_plan_response(response).unwrap();
+        assert_eq!(proposal.details, "拿快递");
+        assert_eq!(proposal.reminder_minutes_before, 0);
     }
 
     #[test]
@@ -808,6 +839,23 @@ mod tests {
                 .as_ref()
                 .and_then(|plan| plan.scheduled_for.as_deref()),
             Some("2026-08-31T15:00:00+08:00")
+        );
+
+        let pickup = tauri::async_runtime::block_on(route_capture(
+            &settings,
+            &secrets,
+            "下午5：20拿快递，提醒时间为5：20，不用提前3小时",
+            "下午5：20拿快递，提醒时间为5：20，不用提前3小时",
+            "2026-09-01T16:30:00+08:00",
+        ))
+        .unwrap();
+        let pickup_plan = pickup.plan.as_ref().expect("pickup should create a plan");
+        assert!(pickup.create_plan);
+        assert!(!pickup_plan.details.trim().is_empty());
+        assert_eq!(pickup_plan.reminder_minutes_before, 0);
+        assert_eq!(
+            pickup_plan.scheduled_for.as_deref(),
+            Some("2026-09-01T17:20:00+08:00")
         );
     }
 }

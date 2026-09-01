@@ -155,7 +155,8 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 reminded_at INTEGER,
-                feishu_synced_at INTEGER
+                feishu_synced_at INTEGER,
+                reminder_minutes_before INTEGER NOT NULL DEFAULT 180
             );
 
             CREATE TABLE IF NOT EXISTS feishu_source_rows (
@@ -376,8 +377,8 @@ impl Database {
             "INSERT INTO plans
              (id, feed_event_id, title, details, content, link_url, notes, scheduled_at, status,
               clarification_question, source_title, created_at, updated_at, reminded_at,
-              feishu_synced_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, NULL, NULL)",
+              feishu_synced_at, reminder_minutes_before)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, NULL, NULL, ?13)",
             params![
                 id,
                 feed_event_id,
@@ -391,6 +392,7 @@ impl Database {
                 proposal.clarification_question,
                 truncate(source_title, 500),
                 now,
+                proposal.reminder_minutes_before,
             ],
         )?;
         self.get_plan_locked(&connection, &id)
@@ -401,7 +403,8 @@ impl Database {
         let mut statement = connection.prepare(
             "SELECT id, feed_event_id, title, details, content, link_url, notes,
                     scheduled_at, status, clarification_question, source_title,
-                    created_at, updated_at, reminded_at, feishu_synced_at
+                    created_at, updated_at, reminded_at, feishu_synced_at,
+                    reminder_minutes_before
              FROM plans
              WHERE (?1 = 1 OR status != 'done')
              ORDER BY status = 'needs_clarification' DESC,
@@ -422,7 +425,15 @@ impl Database {
         let content = input.content.trim();
         let link_url = optional_trimmed(input.link_url.as_deref());
         let notes = optional_trimmed(input.notes.as_deref());
-        validate_plan_edit(title, details, content, link_url, notes, input.scheduled_at)?;
+        validate_plan_edit(
+            title,
+            details,
+            content,
+            link_url,
+            notes,
+            input.scheduled_at,
+            input.reminder_minutes_before,
+        )?;
 
         let connection = self.connection.lock().expect("database lock poisoned");
         let existing = self.get_plan_locked(&connection, plan_id)?;
@@ -441,6 +452,7 @@ impl Database {
             && existing.link_url.as_deref() == link_url
             && existing.notes.as_deref() == notes
             && existing.scheduled_at == input.scheduled_at
+            && existing.reminder_minutes_before == input.reminder_minutes_before
             && existing.status == status
         {
             return Ok(existing);
@@ -450,7 +462,8 @@ impl Database {
             "UPDATE plans
              SET title = ?2, details = ?3, content = ?4, link_url = ?5, notes = ?6,
                  scheduled_at = ?7, status = ?8, clarification_question = ?9,
-                 updated_at = MAX(?10, updated_at + 1), reminded_at = NULL,
+                 reminder_minutes_before = ?10,
+                 updated_at = MAX(?11, updated_at + 1), reminded_at = NULL,
                  feishu_synced_at = NULL
              WHERE id = ?1",
             params![
@@ -463,6 +476,7 @@ impl Database {
                 input.scheduled_at,
                 status,
                 clarification_question,
+                input.reminder_minutes_before,
                 Utc::now().timestamp_millis(),
             ],
         )?;
@@ -481,7 +495,7 @@ impl Database {
             "UPDATE plans
              SET title = ?2, details = ?3, content = ?4, link_url = ?5, notes = ?6,
                  scheduled_at = ?7, status = 'scheduled', clarification_question = NULL,
-                 updated_at = ?8, reminded_at = NULL
+                 reminder_minutes_before = ?8, updated_at = ?9, reminded_at = NULL
              WHERE id = ?1",
             params![
                 plan_id,
@@ -491,6 +505,7 @@ impl Database {
                 proposal.link_url.as_deref().map(str::trim),
                 proposal.notes.as_deref().map(str::trim),
                 scheduled_at,
+                proposal.reminder_minutes_before,
                 Utc::now().timestamp_millis(),
             ],
         )?;
@@ -510,8 +525,8 @@ impl Database {
         let changed = connection.execute(
             "UPDATE plans
              SET title = ?2, details = ?3, content = ?4, link_url = ?5, notes = ?6,
-                 status = 'needs_clarification', clarification_question = ?7,
-                 updated_at = ?8, reminded_at = NULL
+                 status = 'needs_clarification', reminder_minutes_before = ?7,
+                 clarification_question = ?8, updated_at = ?9, reminded_at = NULL
              WHERE id = ?1",
             params![
                 plan_id,
@@ -520,6 +535,7 @@ impl Database {
                 proposal.content.trim(),
                 proposal.link_url.as_deref().map(str::trim),
                 proposal.notes.as_deref().map(str::trim),
+                proposal.reminder_minutes_before,
                 proposal.clarification_question.as_deref(),
                 Utc::now().timestamp_millis(),
             ],
@@ -683,7 +699,8 @@ impl Database {
             .query_row(
                 "SELECT id, feed_event_id, title, details, content, link_url, notes,
                         scheduled_at, status, clarification_question, source_title,
-                        created_at, updated_at, reminded_at, feishu_synced_at
+                        created_at, updated_at, reminded_at, feishu_synced_at,
+                        reminder_minutes_before
                  FROM plans WHERE id = ?1",
                 [plan_id],
                 map_plan,
@@ -742,7 +759,8 @@ impl Database {
         let updated = transaction.query_row(
             "SELECT id, feed_event_id, title, details, content, link_url, notes,
                     scheduled_at, status, clarification_question, source_title,
-                    created_at, updated_at, reminded_at, feishu_synced_at
+                    created_at, updated_at, reminded_at, feishu_synced_at,
+                    reminder_minutes_before
              FROM plans WHERE id = ?1",
             [plan_id],
             map_plan,
@@ -756,7 +774,8 @@ impl Database {
         let mut statement = connection.prepare(
             "SELECT id, feed_event_id, title, details, content, link_url, notes,
                     scheduled_at, status, clarification_question, source_title,
-                    created_at, updated_at, reminded_at, feishu_synced_at
+                    created_at, updated_at, reminded_at, feishu_synced_at,
+                    reminder_minutes_before
              FROM plans
              WHERE status = 'scheduled'
                AND reminded_at IS NULL
@@ -786,7 +805,8 @@ impl Database {
         let mut statement = connection.prepare(
             "SELECT id, feed_event_id, title, details, content, link_url, notes,
                     scheduled_at, status, clarification_question, source_title,
-                    created_at, updated_at, reminded_at, feishu_synced_at
+                    created_at, updated_at, reminded_at, feishu_synced_at,
+                    reminder_minutes_before
              FROM plans
              WHERE feishu_synced_at IS NULL OR feishu_synced_at < updated_at
              ORDER BY updated_at
@@ -1001,7 +1021,8 @@ impl Database {
             .query_row(
                 "SELECT id, feed_event_id, title, details, content, link_url, notes,
                         scheduled_at, status, clarification_question, source_title,
-                        created_at, updated_at, reminded_at, feishu_synced_at
+                        created_at, updated_at, reminded_at, feishu_synced_at,
+                        reminder_minutes_before
                  FROM plans WHERE id = ?1",
                 [plan_id],
                 map_plan,
@@ -2314,6 +2335,10 @@ fn ensure_plan_columns(connection: &Connection) -> AppResult<()> {
             "feishu_synced_at",
             "ALTER TABLE plans ADD COLUMN feishu_synced_at INTEGER",
         ),
+        (
+            "reminder_minutes_before",
+            "ALTER TABLE plans ADD COLUMN reminder_minutes_before INTEGER NOT NULL DEFAULT 180",
+        ),
     ];
     for (column, sql) in migrations {
         if !columns.iter().any(|existing| existing == column) {
@@ -2340,6 +2365,7 @@ fn map_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanItem> {
         updated_at: row.get(12)?,
         reminded_at: row.get(13)?,
         feishu_synced_at: row.get(14)?,
+        reminder_minutes_before: row.get(15)?,
     })
 }
 
@@ -2392,6 +2418,11 @@ pub(crate) fn validate_plan_proposal(
     if proposal.content.trim().is_empty() || proposal.content.chars().count() > 60 {
         return Err(AppError::AiInvalid("计划内容为空或超过 60 字".to_string()));
     }
+    if proposal.reminder_minutes_before > 10_080 {
+        return Err(AppError::AiInvalid(
+            "计划提醒提前量不能超过 7 天".to_string(),
+        ));
+    }
     if let Some(link_url) = proposal.link_url.as_deref() {
         validate_http_url(link_url)?;
     }
@@ -2435,6 +2466,7 @@ fn validate_plan_edit(
     link_url: Option<&str>,
     notes: Option<&str>,
     scheduled_at: Option<i64>,
+    reminder_minutes_before: u32,
 ) -> AppResult<()> {
     if title.is_empty() || title.chars().count() > 80 {
         return Err(AppError::Validation(
@@ -2466,6 +2498,11 @@ fn validate_plan_edit(
     if notes.is_some_and(|value| value.chars().count() > 500) {
         return Err(AppError::Validation(
             "计划注意事项不能超过 500 字".to_string(),
+        ));
+    }
+    if reminder_minutes_before > 10_080 {
+        return Err(AppError::Validation(
+            "计划提醒提前量不能超过 7 天".to_string(),
         ));
     }
     if scheduled_at.is_some_and(|value| value <= 0) {
@@ -2596,6 +2633,7 @@ mod tests {
             time_evidence: None,
             needs_clarification,
             clarification_question: needs_clarification.then(|| "准备在几点验收？".to_string()),
+            reminder_minutes_before: 180,
         }
     }
 
@@ -2723,6 +2761,7 @@ mod tests {
                     link_url: Some(" https://example.com/review ".to_string()),
                     notes: Some(" 先准备测试数据 ".to_string()),
                     scheduled_at: Some(1_788_138_000_000),
+                    reminder_minutes_before: 0,
                 },
             )
             .unwrap();
@@ -2739,6 +2778,7 @@ mod tests {
         );
         assert_eq!(updated.notes.as_deref(), Some("先准备测试数据"));
         assert_eq!(updated.scheduled_at, Some(1_788_138_000_000));
+        assert_eq!(updated.reminder_minutes_before, 0);
         assert_eq!(updated.status, "scheduled");
         assert!(updated.reminded_at.is_none());
         assert!(updated.feishu_synced_at.is_none());
@@ -2766,6 +2806,7 @@ mod tests {
                     link_url: updated.link_url.clone(),
                     notes: updated.notes.clone(),
                     scheduled_at: None,
+                    reminder_minutes_before: updated.reminder_minutes_before,
                 },
             )
             .unwrap();
@@ -2790,6 +2831,7 @@ mod tests {
                     link_url: None,
                     notes: None,
                     scheduled_at: None,
+                    reminder_minutes_before: 180,
                 },
             )
             .is_err());
@@ -2947,6 +2989,7 @@ mod tests {
                     link_url: reopened.link_url.clone(),
                     notes: reopened.notes.clone(),
                     scheduled_at: reopened.scheduled_at,
+                    reminder_minutes_before: reopened.reminder_minutes_before,
                 },
             )
             .unwrap();
@@ -3003,6 +3046,7 @@ mod tests {
             "notes",
             "reminded_at",
             "feishu_synced_at",
+            "reminder_minutes_before",
         ] {
             assert!(columns.iter().any(|column| column == expected));
         }

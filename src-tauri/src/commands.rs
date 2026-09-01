@@ -1133,6 +1133,7 @@ mod tests {
             time_evidence: Some("用户授权安排".to_string()),
             needs_clarification: false,
             clarification_question: None,
+            reminder_minutes_before: 180,
         }
     }
 

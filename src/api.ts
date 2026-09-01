@@ -203,6 +203,7 @@ export interface PlanItem {
   createdAt: number;
   updatedAt: number;
   remindedAt?: number;
+  reminderMinutesBefore: number;
 }
 
 export interface UpdatePlanInput {
@@ -212,6 +213,7 @@ export interface UpdatePlanInput {
   linkUrl?: string;
   notes?: string;
   scheduledAt?: number;
+  reminderMinutesBefore: number;
 }
 
 export interface CaptureCommitResult {

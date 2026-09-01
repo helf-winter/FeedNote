@@ -114,6 +114,7 @@ interface PlanEditorForm {
   linkUrl: string;
   notes: string;
   scheduledLocal: string;
+  reminderMinutesBefore: number;
 }
 
 const activePage = ref<Page>("inbox");
@@ -580,6 +581,7 @@ function openPlanEditor(plan: PlanItem): void {
     linkUrl: plan.linkUrl ?? "",
     notes: plan.notes ?? "",
     scheduledLocal: toLocalDateTimeInput(plan.scheduledAt),
+    reminderMinutesBefore: plan.reminderMinutesBefore,
   };
 }
 
@@ -609,6 +611,7 @@ async function savePlanEdit(): Promise<void> {
       linkUrl: editor.linkUrl || undefined,
       notes: editor.notes || undefined,
       scheduledAt,
+      reminderMinutesBefore: editor.reminderMinutesBefore,
     });
     closePlanEditor();
     await Promise.all([refreshPlans(), refreshFeishuStatus()]);
@@ -1467,7 +1470,7 @@ function typeLabel(type: string): string {
             <li><Smartphone :size="14" />手机推送默认关闭，只发送计划卡片字段，不发送原文和周边上下文。</li>
             <li><Cloud :size="14" />三个飞书通道独立开关；计划表只回读已有计划的完成状态，投递表绝不反向生成计划。</li>
             <li><CircleAlert :size="14" />秘密表只做 FeedNote 到飞书的单向写入；启用后秘密值在飞书中是明文，安全边界由飞书账号和文档权限承担。</li>
-            <li><Clock3 :size="14" />飞书待办只回读已有任务的标题、精确开始时间和完成状态，并固定提前 3 小时提醒。</li>
+            <li><Clock3 :size="14" />飞书待办只回读已有任务的标题、精确开始时间和完成状态；提醒默认提前 3 小时，可按单条计划改为准时或其他提前量。</li>
           </ul>
         </div>
       </section>
@@ -1518,6 +1521,7 @@ function typeLabel(type: string): string {
           <div class="plan-edit-grid">
             <label class="wide-field"><span>标题</span><input v-model="planEditor.title" maxlength="80" required autofocus /></label>
             <label><span>时间</span><input v-model="planEditor.scheduledLocal" type="datetime-local" /></label>
+            <label><span>飞书提醒</span><select v-model.number="planEditor.reminderMinutesBefore"><option :value="0">准时</option><option :value="5">提前 5 分钟</option><option :value="15">提前 15 分钟</option><option :value="30">提前 30 分钟</option><option :value="60">提前 1 小时</option><option :value="180">提前 3 小时</option><option :value="1440">提前 1 天</option></select></label>
             <label><span>内容</span><input v-model="planEditor.content" maxlength="60" required /></label>
             <label class="wide-field"><span>详情</span><textarea v-model="planEditor.details" rows="4" maxlength="4000" required /></label>
             <label class="wide-field"><span>链接</span><input v-model.trim="planEditor.linkUrl" type="url" maxlength="2000" placeholder="https://" /></label>
