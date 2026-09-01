@@ -212,6 +212,7 @@ pub fn run() {
             commands::commit_capture,
             commands::resolve_plan_time,
             commands::list_plans,
+            commands::update_plan,
             commands::set_plan_done,
             commands::toggle_plan_dock,
             commands::show_plan_dock_menu,

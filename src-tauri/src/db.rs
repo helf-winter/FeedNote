@@ -10,7 +10,7 @@ use crate::{
     models::{
         AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, EncryptedSecretRecord,
         FeedEvent, FeishuPlanTaskMapping, FeishuSheetState, MemoItem, MemoryDetail, MemorySummary,
-        MemoryVersion, PlanItem, PlanProposal, ReviewItem, Stats, VaultMeta,
+        MemoryVersion, PlanItem, PlanProposal, ReviewItem, Stats, UpdatePlanInput, VaultMeta,
     },
 };
 
@@ -415,6 +415,59 @@ impl Database {
         self.get_plan_locked(&connection, plan_id)
     }
 
+    pub fn update_plan(&self, plan_id: &str, input: &UpdatePlanInput) -> AppResult<PlanItem> {
+        let title = input.title.trim();
+        let details = input.details.trim();
+        let content = input.content.trim();
+        let link_url = optional_trimmed(input.link_url.as_deref());
+        let notes = optional_trimmed(input.notes.as_deref());
+        validate_plan_edit(title, details, content, link_url, notes, input.scheduled_at)?;
+
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let existing = self.get_plan_locked(&connection, plan_id)?;
+        let status = if existing.status == "done" {
+            "done"
+        } else if input.scheduled_at.is_some() {
+            "scheduled"
+        } else {
+            "needs_clarification"
+        };
+        let clarification_question =
+            (status == "needs_clarification").then_some("请补充计划的具体日期和时间。");
+        if existing.title == title
+            && existing.details == details
+            && existing.content == content
+            && existing.link_url.as_deref() == link_url
+            && existing.notes.as_deref() == notes
+            && existing.scheduled_at == input.scheduled_at
+            && existing.status == status
+        {
+            return Ok(existing);
+        }
+
+        connection.execute(
+            "UPDATE plans
+             SET title = ?2, details = ?3, content = ?4, link_url = ?5, notes = ?6,
+                 scheduled_at = ?7, status = ?8, clarification_question = ?9,
+                 updated_at = MAX(?10, updated_at + 1), reminded_at = NULL,
+                 feishu_synced_at = NULL
+             WHERE id = ?1",
+            params![
+                plan_id,
+                title,
+                details,
+                content,
+                link_url,
+                notes,
+                input.scheduled_at,
+                status,
+                clarification_question,
+                Utc::now().timestamp_millis(),
+            ],
+        )?;
+        self.get_plan_locked(&connection, plan_id)
+    }
+
     pub fn schedule_plan(
         &self,
         plan_id: &str,
@@ -478,10 +531,41 @@ impl Database {
 
     pub fn set_plan_done(&self, plan_id: &str, done: bool) -> AppResult<PlanItem> {
         let connection = self.connection.lock().expect("database lock poisoned");
-        let status = if done { "done" } else { "scheduled" };
+        let scheduled_at = connection
+            .query_row(
+                "SELECT scheduled_at FROM plans WHERE id = ?1",
+                [plan_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound("计划不存在".to_string()))?;
+        let status = if done {
+            "done"
+        } else if scheduled_at.is_some() {
+            "scheduled"
+        } else {
+            "needs_clarification"
+        };
+        let clarification_question =
+            (status == "needs_clarification").then_some("请补充计划的具体日期和时间。");
         let changed = connection.execute(
-            "UPDATE plans SET status = ?2, updated_at = MAX(?3, updated_at + 1) WHERE id = ?1",
-            params![plan_id, status, Utc::now().timestamp_millis()],
+            "UPDATE plans
+             SET status = ?2,
+                 clarification_question = CASE
+                     WHEN ?2 = 'scheduled' THEN NULL
+                     WHEN ?2 = 'needs_clarification'
+                         THEN COALESCE(NULLIF(clarification_question, ''), ?3)
+                     ELSE clarification_question
+                 END,
+                 updated_at = MAX(?4, updated_at + 1),
+                 reminded_at = CASE WHEN ?2 = 'done' THEN reminded_at ELSE NULL END
+             WHERE id = ?1",
+            params![
+                plan_id,
+                status,
+                clarification_question,
+                Utc::now().timestamp_millis()
+            ],
         )?;
         if changed == 0 {
             return Err(AppError::NotFound("计划不存在".to_string()));
@@ -2241,6 +2325,56 @@ fn validate_http_url(value: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_plan_edit(
+    title: &str,
+    details: &str,
+    content: &str,
+    link_url: Option<&str>,
+    notes: Option<&str>,
+    scheduled_at: Option<i64>,
+) -> AppResult<()> {
+    if title.is_empty() || title.chars().count() > 80 {
+        return Err(AppError::Validation(
+            "计划标题不能为空且不能超过 80 字".to_string(),
+        ));
+    }
+    if details.is_empty() || details.chars().count() > 4_000 {
+        return Err(AppError::Validation(
+            "计划详情不能为空且不能超过 4000 字".to_string(),
+        ));
+    }
+    if content.is_empty() || content.chars().count() > 60 {
+        return Err(AppError::Validation(
+            "计划内容不能为空且不能超过 60 字".to_string(),
+        ));
+    }
+    if let Some(value) = link_url {
+        if value.chars().count() > 2_000 {
+            return Err(AppError::Validation("计划链接不能超过 2000 字".to_string()));
+        }
+        let url = reqwest::Url::parse(value)
+            .map_err(|_| AppError::Validation("计划链接不是有效网址".to_string()))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(AppError::Validation(
+                "计划链接只允许 http 或 https".to_string(),
+            ));
+        }
+    }
+    if notes.is_some_and(|value| value.chars().count() > 500) {
+        return Err(AppError::Validation(
+            "计划注意事项不能超过 500 字".to_string(),
+        ));
+    }
+    if scheduled_at.is_some_and(|value| value <= 0) {
+        return Err(AppError::Validation("计划时间无效".to_string()));
+    }
+    Ok(())
+}
+
+fn optional_trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 fn count(connection: &Connection, sql: &str) -> AppResult<i64> {
     Ok(connection.query_row(sql, [], |row| row.get(0))?)
 }
@@ -2430,6 +2564,118 @@ mod tests {
             .list_due_plan_reminders(1_788_130_000_000, 1_788_134_400_000)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn plan_edit_updates_original_record_and_reuses_remote_mapping() {
+        let database = Database::in_memory().unwrap();
+        let feed = database
+            .create_selection_feed("明天验收", "明天上午九点验收", "项目聊天")
+            .unwrap();
+        let plan = database
+            .create_plan(
+                &feed.feed_id,
+                &plan_proposal(false),
+                Some(1_788_134_400_000),
+                "项目聊天",
+            )
+            .unwrap();
+        database
+            .mark_plan_feishu_synced(&plan.id, plan.updated_at + 1)
+            .unwrap();
+        database
+            .mark_plan_reminded(&plan.id, 1_788_133_500_000)
+            .unwrap();
+        database
+            .save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
+                plan_id: plan.id.clone(),
+                task_guid: "existing-task-guid".to_string(),
+                task_url: Some("https://applink.feishu.cn/task".to_string()),
+                plan_updated_at: plan.updated_at,
+                completed: false,
+            })
+            .unwrap();
+
+        let updated = database
+            .update_plan(
+                &plan.id,
+                &UpdatePlanInput {
+                    title: "  调整后的验收计划  ".to_string(),
+                    details: "检查主界面计划编辑和飞书同步。".to_string(),
+                    content: "桌面计划验收".to_string(),
+                    link_url: Some(" https://example.com/review ".to_string()),
+                    notes: Some(" 先准备测试数据 ".to_string()),
+                    scheduled_at: Some(1_788_138_000_000),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.id, plan.id);
+        assert_eq!(updated.feed_event_id, plan.feed_event_id);
+        assert_eq!(updated.source_title, plan.source_title);
+        assert_eq!(updated.created_at, plan.created_at);
+        assert_eq!(updated.title, "调整后的验收计划");
+        assert_eq!(updated.content, "桌面计划验收");
+        assert_eq!(
+            updated.link_url.as_deref(),
+            Some("https://example.com/review")
+        );
+        assert_eq!(updated.notes.as_deref(), Some("先准备测试数据"));
+        assert_eq!(updated.scheduled_at, Some(1_788_138_000_000));
+        assert_eq!(updated.status, "scheduled");
+        assert!(updated.reminded_at.is_none());
+        assert!(updated.feishu_synced_at.is_none());
+        assert_eq!(database.count_pending_feishu_plans().unwrap(), 1);
+        assert_eq!(database.count_pending_feishu_plan_tasks().unwrap(), 1);
+        let mappings = database.list_feishu_plan_task_mappings().unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].task_guid, "existing-task-guid");
+        database
+            .mark_plan_reminded(&plan.id, 1_788_137_000_000)
+            .unwrap();
+        let done = database.set_plan_done(&plan.id, true).unwrap();
+        assert!(done.reminded_at.is_some());
+        let reopened = database.set_plan_done(&plan.id, false).unwrap();
+        assert_eq!(reopened.status, "scheduled");
+        assert!(reopened.reminded_at.is_none());
+
+        let unscheduled = database
+            .update_plan(
+                &plan.id,
+                &UpdatePlanInput {
+                    title: updated.title.clone(),
+                    details: updated.details.clone(),
+                    content: updated.content.clone(),
+                    link_url: updated.link_url.clone(),
+                    notes: updated.notes.clone(),
+                    scheduled_at: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(unscheduled.status, "needs_clarification");
+        assert!(unscheduled.clarification_question.is_some());
+        assert_eq!(
+            database.set_plan_done(&plan.id, true).unwrap().status,
+            "done"
+        );
+        let reopened = database.set_plan_done(&plan.id, false).unwrap();
+        assert_eq!(reopened.status, "needs_clarification");
+        assert!(reopened.clarification_question.is_some());
+        assert!(reopened.reminded_at.is_none());
+
+        assert!(database
+            .update_plan(
+                &plan.id,
+                &UpdatePlanInput {
+                    title: " ".to_string(),
+                    details: "详情".to_string(),
+                    content: "内容".to_string(),
+                    link_url: None,
+                    notes: None,
+                    scheduled_at: None,
+                },
+            )
+            .is_err());
     }
 
     #[test]

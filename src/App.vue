@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
   BrainCircuit,
+  CalendarClock,
   Check,
   ChevronRight,
   CircleAlert,
@@ -52,12 +53,14 @@ import {
   listFeeds,
   listMemories,
   listMemos,
+  listPlans,
   listReviews,
   listSecretItems,
   lockVault,
   processFeed,
   requestDeleteFeed,
   resolveReview,
+  setPlanDone,
   deleteSecretItem,
   initializeVault,
   openExternalLink,
@@ -67,6 +70,7 @@ import {
   syncFeishuSourceNow,
   testMobilePush,
   updateMemo,
+  updatePlan,
   updateSettings,
   updateSecretItem,
   unlockVault,
@@ -80,6 +84,7 @@ import {
   type MemorySummary,
   type MemoItem,
   type Page,
+  type PlanItem,
   type ReviewItem,
   type Stats,
   type SecretItem,
@@ -101,6 +106,16 @@ interface MemoEditorForm {
   content: string;
 }
 
+interface PlanEditorForm {
+  id: string;
+  title: string;
+  details: string;
+  content: string;
+  linkUrl: string;
+  notes: string;
+  scheduledLocal: string;
+}
+
 const activePage = ref<Page>("inbox");
 const sidebarOpen = ref(false);
 const composer = ref("");
@@ -111,6 +126,8 @@ const memoryType = ref("");
 const feeds = ref<FeedEvent[]>([]);
 const memories = ref<MemorySummary[]>([]);
 const memos = ref<MemoItem[]>([]);
+const plans = ref<PlanItem[]>([]);
+const planView = ref<"active" | "all">("active");
 const reviews = ref<ReviewItem[]>([]);
 const stats = ref<Stats>({ totalFeeds: 0, totalMemories: 0, pendingReviews: 0, pendingProcessing: 0 });
 const settings = ref<AppSettings>({
@@ -165,6 +182,9 @@ const feishuMemoStatus = ref<FeishuMemoStatus>({
 });
 const memoEditor = ref<MemoEditorForm>();
 const memoEditBusy = ref(false);
+const planEditor = ref<PlanEditorForm>();
+const planEditBusy = ref(false);
+const planStatusBusy = ref(new Set<string>());
 const feishuSourceState = ref<"idle" | "syncing" | "success" | "error">("idle");
 const feishuSourceMessage = ref("");
 const feishuSourceStatus = ref<FeishuSourceStatus>({
@@ -198,11 +218,16 @@ const filteredSecrets = computed(() => {
       .some((value) => value!.toLowerCase().includes(query)),
   );
 });
+const visiblePlans = computed(() =>
+  planView.value === "all" ? plans.value : plans.value.filter((plan) => plan.status !== "done"),
+);
+const activePlanCount = computed(() => plans.value.filter((plan) => plan.status !== "done").length);
 
 const pageTitles: Record<Page, { title: string; subtitle: string }> = {
   inbox: { title: "收集箱", subtitle: "原样保存每一次输入，再慢慢理解" },
   memories: { title: "记忆", subtitle: "当前理解，以及它从哪里来" },
   memo: { title: "备忘录", subtitle: "留给更长远的事情" },
+  plans: { title: "桌面计划", subtitle: "查看并调整接下来的安排" },
   secrets: { title: "秘密备忘录", subtitle: "本地加密保存，仅在解锁后显示" },
   review: { title: "待澄清", subtitle: "只有无法可靠理解的内容才会停在这里" },
   settings: { title: "设置", subtitle: "模型、数据和隐私边界" },
@@ -212,6 +237,7 @@ const navItems = [
   { id: "inbox" as const, label: "收集箱", icon: Inbox },
   { id: "memories" as const, label: "记忆", icon: BrainCircuit },
   { id: "memo" as const, label: "备忘录", icon: NotebookPen },
+  { id: "plans" as const, label: "桌面计划", icon: CalendarClock },
   { id: "secrets" as const, label: "秘密备忘录", icon: LockKeyhole },
   { id: "review" as const, label: "待澄清", icon: CircleAlert },
   { id: "settings" as const, label: "设置", icon: Settings },
@@ -232,6 +258,7 @@ const memoryTypes = [
 const canSubmit = computed(() => composer.value.trim().length > 0 && !saving.value);
 let stopVaultListener: (() => void) | undefined;
 let stopMemoListener: (() => void) | undefined;
+let stopPlanListener: (() => void) | undefined;
 
 onMounted(async () => {
   await refreshAll();
@@ -250,6 +277,9 @@ onMounted(async () => {
     stopMemoListener = await listen("memos-changed", () => {
       if (activePage.value === "memo") void refreshMemos();
     });
+    stopPlanListener = await listen("plans-changed", () => {
+      void refreshPlans();
+    });
   }
   window.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
@@ -261,6 +291,7 @@ onMounted(async () => {
       selectedMemory.value = undefined;
       deleteTarget.value = undefined;
       closeMemoEditor();
+      closePlanEditor();
       closeSecretEditor();
       closeSecretDelete();
       sidebarOpen.value = false;
@@ -271,23 +302,26 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopVaultListener?.();
   stopMemoListener?.();
+  stopPlanListener?.();
 });
 
 async function refreshAll(): Promise<void> {
   loading.value = true;
   try {
-    const [nextFeeds, nextMemories, nextReviews, nextStats, nextSettings] = await Promise.all([
+    const [nextFeeds, nextMemories, nextReviews, nextStats, nextSettings, nextPlans] = await Promise.all([
       listFeeds(feedSearch.value),
       listMemories(memorySearch.value, memoryType.value),
       listReviews(),
       getStats(),
       getSettings(),
+      listPlans(true),
     ]);
     feeds.value = nextFeeds;
     memories.value = nextMemories;
     reviews.value = nextReviews;
     stats.value = nextStats;
     settings.value = nextSettings;
+    plans.value = nextPlans;
   } catch (error) {
     notify(errorMessage(error), "error");
   } finally {
@@ -529,6 +563,79 @@ async function openFeishuMemoSheet(): Promise<void> {
   await openExternalLink(feishuMemoStatus.value.spreadsheetUrl);
 }
 
+async function refreshPlans(): Promise<void> {
+  try {
+    plans.value = await listPlans(true);
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  }
+}
+
+function openPlanEditor(plan: PlanItem): void {
+  planEditor.value = {
+    id: plan.id,
+    title: plan.title,
+    details: plan.details,
+    content: plan.content,
+    linkUrl: plan.linkUrl ?? "",
+    notes: plan.notes ?? "",
+    scheduledLocal: toLocalDateTimeInput(plan.scheduledAt),
+  };
+}
+
+function closePlanEditor(): void {
+  planEditor.value = undefined;
+  planEditBusy.value = false;
+}
+
+async function savePlanEdit(): Promise<void> {
+  const editor = planEditor.value;
+  if (!editor || planEditBusy.value) return;
+  if (!editor.title.trim() || !editor.content.trim() || !editor.details.trim()) {
+    notify("标题、内容和详情不能为空", "error");
+    return;
+  }
+  const scheduledAt = editor.scheduledLocal ? new Date(editor.scheduledLocal).getTime() : undefined;
+  if (scheduledAt !== undefined && !Number.isFinite(scheduledAt)) {
+    notify("计划时间无效", "error");
+    return;
+  }
+  planEditBusy.value = true;
+  try {
+    await updatePlan(editor.id, {
+      title: editor.title,
+      details: editor.details,
+      content: editor.content,
+      linkUrl: editor.linkUrl || undefined,
+      notes: editor.notes || undefined,
+      scheduledAt,
+    });
+    closePlanEditor();
+    await Promise.all([refreshPlans(), refreshFeishuStatus()]);
+    notify("桌面计划已更新", "success");
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  } finally {
+    planEditBusy.value = false;
+  }
+}
+
+async function changePlanDone(plan: PlanItem, done: boolean): Promise<void> {
+  if (planStatusBusy.value.has(plan.id)) return;
+  planStatusBusy.value = new Set(planStatusBusy.value).add(plan.id);
+  try {
+    await setPlanDone(plan.id, done);
+    await Promise.all([refreshPlans(), refreshFeishuStatus()]);
+    notify(done ? "计划已完成" : "计划已重新打开", "success");
+  } catch (error) {
+    notify(errorMessage(error), "error");
+  } finally {
+    const next = new Set(planStatusBusy.value);
+    next.delete(plan.id);
+    planStatusBusy.value = next;
+  }
+}
+
 async function refreshFeishuSourceStatus(): Promise<void> {
   try {
     feishuSourceStatus.value = await getFeishuSourceStatus();
@@ -576,12 +683,14 @@ async function exportData(): Promise<void> {
 
 function navigate(page: Page): void {
   closeMemoEditor();
+  closePlanEditor();
   closeSecretEditor();
   closeSecretDelete();
   activePage.value = page;
   sidebarOpen.value = false;
   if (page === "inbox") nextTick(() => composerElement.value?.focus());
   if (page === "memo") void refreshMemos();
+  if (page === "plans") void refreshPlans();
   if (page === "secrets") void refreshSecretVault();
 }
 
@@ -756,6 +865,24 @@ function formatTime(timestamp: number): string {
     : date.toLocaleDateString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function toLocalDateTimeInput(timestamp?: number): string {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatPlanSchedule(timestamp?: number): string {
+  if (!timestamp) return "等待安排时间";
+  return new Date(timestamp).toLocaleString("zh-CN", {
+    month: "short",
+    day: "numeric",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function statusLabel(status: string): string {
   return (
     {
@@ -807,6 +934,7 @@ function typeLabel(type: string): string {
         >
           <component :is="item.icon" :size="18" />
           <span>{{ item.label }}</span>
+          <span v-if="item.id === 'plans' && activePlanCount" class="nav-count plan-count">{{ activePlanCount }}</span>
           <span v-if="item.id === 'review' && stats.pendingReviews" class="nav-count">{{ stats.pendingReviews }}</span>
         </button>
       </nav>
@@ -988,6 +1116,50 @@ function typeLabel(type: string): string {
               <span>{{ memo.sourceTitle || '未知来源' }}</span>
               <span>{{ formatTime(memo.createdAt) }}</span>
               <span :class="memo.feishuSyncedAt ? 'memo-synced' : 'memo-pending'">{{ memo.feishuSyncedAt ? '已同步飞书' : '等待同步' }}</span>
+            </footer>
+          </article>
+        </div>
+      </section>
+
+      <section v-else-if="activePage === 'plans'" class="page plans-page">
+        <div class="plans-toolbar">
+          <span>{{ activePlanCount }} 项进行中 · {{ plans.length }} 项全部</span>
+          <div class="plan-view-control" role="group" aria-label="计划范围">
+            <button type="button" :class="{ active: planView === 'active' }" @click="planView = 'active'">进行中</button>
+            <button type="button" :class="{ active: planView === 'all' }" @click="planView = 'all'">全部</button>
+          </div>
+        </div>
+
+        <div v-if="visiblePlans.length === 0" class="empty-state">
+          <CalendarClock :size="28" />
+          <strong>{{ planView === 'active' ? '没有进行中的计划' : '还没有桌面计划' }}</strong>
+          <span>从选区浮球选择“喂”后，识别出的待办会出现在这里。</span>
+        </div>
+        <div v-else class="main-plan-list">
+          <article v-for="plan in visiblePlans" :key="plan.id" class="main-plan-card" :class="{ done: plan.status === 'done', unscheduled: !plan.scheduledAt }">
+            <div class="main-plan-head">
+              <div>
+                <span class="plan-schedule"><CalendarClock :size="15" />{{ formatPlanSchedule(plan.scheduledAt) }}</span>
+                <h2>{{ plan.title }}</h2>
+              </div>
+              <button class="icon-button" type="button" title="编辑计划" aria-label="编辑计划" @click="openPlanEditor(plan)"><Pencil :size="16" /></button>
+            </div>
+            <dl class="main-plan-fields">
+              <template v-if="plan.content"><dt>内容</dt><dd>{{ plan.content }}</dd></template>
+              <template v-if="plan.details && plan.details !== plan.content"><dt>详情</dt><dd>{{ plan.details }}</dd></template>
+              <template v-if="plan.linkUrl"><dt>链接</dt><dd><button type="button" @click="openExternalLink(plan.linkUrl!)"><span>{{ plan.linkUrl }}</span><ExternalLink :size="14" /></button></dd></template>
+              <template v-if="plan.notes"><dt>注意</dt><dd>{{ plan.notes }}</dd></template>
+              <template v-if="plan.clarificationQuestion && !plan.scheduledAt"><dt>待补充</dt><dd>{{ plan.clarificationQuestion }}</dd></template>
+            </dl>
+            <footer class="main-plan-footer">
+              <span>{{ plan.sourceTitle || '未知来源' }}</span>
+              <span>更新于 {{ formatTime(plan.updatedAt) }}</span>
+              <button class="plan-state-button" type="button" :disabled="planStatusBusy.has(plan.id)" @click="changePlanDone(plan, plan.status !== 'done')">
+                <LoaderCircle v-if="planStatusBusy.has(plan.id)" class="spin" :size="15" />
+                <RefreshCw v-else-if="plan.status === 'done'" :size="15" />
+                <Check v-else :size="15" />
+                {{ plan.status === 'done' ? '重新打开' : '标记完成' }}
+              </button>
             </footer>
           </article>
         </div>
@@ -1332,6 +1504,33 @@ function typeLabel(type: string): string {
             </section>
           </div>
         </aside>
+      </div>
+    </Transition>
+
+    <Transition name="modal">
+      <div v-if="planEditor" class="modal-layer">
+        <button class="modal-scrim" aria-label="取消编辑" @click="closePlanEditor" />
+        <form class="secret-dialog plan-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="plan-edit-title" @submit.prevent="savePlanEdit">
+          <header>
+            <div><span class="plan-editor-type">桌面计划</span><h2 id="plan-edit-title">编辑计划</h2></div>
+            <button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="closePlanEditor"><X :size="18" /></button>
+          </header>
+          <div class="plan-edit-grid">
+            <label class="wide-field"><span>标题</span><input v-model="planEditor.title" maxlength="80" required autofocus /></label>
+            <label><span>时间</span><input v-model="planEditor.scheduledLocal" type="datetime-local" /></label>
+            <label><span>内容</span><input v-model="planEditor.content" maxlength="60" required /></label>
+            <label class="wide-field"><span>详情</span><textarea v-model="planEditor.details" rows="4" maxlength="4000" required /></label>
+            <label class="wide-field"><span>链接</span><input v-model.trim="planEditor.linkUrl" type="url" maxlength="2000" placeholder="https://" /></label>
+            <label class="wide-field"><span>注意事项</span><textarea v-model="planEditor.notes" rows="3" maxlength="500" /></label>
+          </div>
+          <div class="dialog-actions">
+            <button class="secondary-button" type="button" @click="closePlanEditor">取消</button>
+            <button class="primary-button" type="submit" :disabled="planEditBusy || !planEditor.title.trim() || !planEditor.content.trim() || !planEditor.details.trim()">
+              <LoaderCircle v-if="planEditBusy" class="spin" :size="16" />
+              <Check v-else :size="16" />保存
+            </button>
+          </div>
+        </form>
       </div>
     </Transition>
 

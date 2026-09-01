@@ -368,6 +368,17 @@ pub struct PlanItem {
     pub feishu_synced_at: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePlanInput {
+    pub title: String,
+    pub details: String,
+    pub content: String,
+    pub link_url: Option<String>,
+    pub notes: Option<String>,
+    pub scheduled_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuSheetState {

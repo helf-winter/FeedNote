@@ -17,8 +17,8 @@ use crate::{
         AppSettings, CaptureCommitResult, CreateFeedInput, CreateFeedResult, DeleteConfirmation,
         FeedEvent, FeishuMemoStatus, FeishuSecretStatus, FeishuSourceStatus, FeishuSyncStatus,
         MemoCaptureResult, MemoItem, MemoryDetail, MemorySummary, PlanItem, PlanProposal,
-        ProcessResult, ReviewItem, SecretItem, SecretStashResult, Stats, UpdateSecretInput,
-        UpdateSettingsInput, VaultStatus,
+        ProcessResult, ReviewItem, SecretItem, SecretStashResult, Stats, UpdatePlanInput,
+        UpdateSecretInput, UpdateSettingsInput, VaultStatus,
     },
     windows_selection::{self, SelectionSnapshot},
     AppState, PendingCapture,
@@ -821,6 +821,18 @@ pub fn list_plans(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<PlanItem>> {
     state.database.list_plans(include_done.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn update_plan(
+    plan_id: String,
+    input: UpdatePlanInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<PlanItem> {
+    let plan = state.database.update_plan(&plan_id, &input)?;
+    let _ = app.emit("plans-changed", &plan);
+    Ok(plan)
 }
 
 #[tauri::command]

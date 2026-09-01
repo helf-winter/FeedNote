@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 
-export type Page = "inbox" | "memories" | "memo" | "secrets" | "review" | "settings";
+export type Page = "inbox" | "memories" | "memo" | "plans" | "secrets" | "review" | "settings";
 
 export interface FeedEvent {
   id: string;
@@ -203,6 +203,15 @@ export interface PlanItem {
   createdAt: number;
   updatedAt: number;
   remindedAt?: number;
+}
+
+export interface UpdatePlanInput {
+  title: string;
+  details: string;
+  content: string;
+  linkUrl?: string;
+  notes?: string;
+  scheduledAt?: number;
 }
 
 export interface CaptureCommitResult {
@@ -615,11 +624,18 @@ export async function resolvePlanTime(planId: string, answer: string): Promise<C
 }
 
 export async function listPlans(includeDone = false): Promise<PlanItem[]> {
-  return invoke("list_plans", { includeDone });
+  if (isTauri) return invoke("list_plans", { includeDone });
+  return [];
+}
+
+export async function updatePlan(planId: string, input: UpdatePlanInput): Promise<PlanItem> {
+  if (isTauri) return invoke("update_plan", { planId, input });
+  throw new Error("浏览器预览不提供计划编辑");
 }
 
 export async function setPlanDone(planId: string, done: boolean): Promise<PlanItem> {
-  return invoke("set_plan_done", { planId, done });
+  if (isTauri) return invoke("set_plan_done", { planId, done });
+  throw new Error("浏览器预览不提供计划状态修改");
 }
 
 export async function togglePlanDock(): Promise<boolean> {
