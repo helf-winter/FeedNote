@@ -42,7 +42,6 @@ import {
   createFeed,
   deleteFeed,
   exportArchive,
-  getFeishuSourceStatus,
   getFeishuMemoStatus,
   getFeishuSecretStatus,
   getFeishuSyncStatus,
@@ -68,7 +67,6 @@ import {
   syncFeishuNow,
   syncFeishuMemosNow,
   syncFeishuSecretsNow,
-  syncFeishuSourceNow,
   testMobilePush,
   updateMemo,
   updatePlan,
@@ -77,7 +75,6 @@ import {
   unlockVault,
   type AppSettings,
   type FeedEvent,
-  type FeishuSourceStatus,
   type FeishuMemoStatus,
   type FeishuSecretStatus,
   type FeishuSyncStatus,
@@ -189,17 +186,6 @@ const memoEditBusy = ref(false);
 const planEditor = ref<PlanEditorForm>();
 const planEditBusy = ref(false);
 const planStatusBusy = ref(new Set<string>());
-const feishuSourceState = ref<"idle" | "syncing" | "success" | "error">("idle");
-const feishuSourceMessage = ref("");
-const feishuSourceStatus = ref<FeishuSourceStatus>({
-  enabled: false,
-  configured: false,
-  spreadsheetUrl: "",
-  totalRows: 0,
-  actionableRows: 0,
-  trackedRows: 0,
-  importedPlans: 0,
-});
 const vaultStatus = ref<VaultStatus>({ initialized: false, unlocked: false, secretCount: 0 });
 const secretItems = ref<SecretItem[]>([]);
 const secretSearch = ref("");
@@ -268,7 +254,6 @@ let stopPlanListener: (() => void) | undefined;
 onMounted(async () => {
   await refreshAll();
   await refreshFeishuStatus();
-  await refreshFeishuSourceStatus();
   await refreshVaultStatus();
   await refreshFeishuSecretStatus();
   if (isTauri) {
@@ -643,43 +628,6 @@ async function changePlanDone(plan: PlanItem, done: boolean): Promise<void> {
     next.delete(plan.id);
     planStatusBusy.value = next;
   }
-}
-
-async function refreshFeishuSourceStatus(): Promise<void> {
-  try {
-    feishuSourceStatus.value = await getFeishuSourceStatus();
-  } catch {
-    feishuSourceStatus.value = {
-      enabled: settings.value.feishuSourceEnabled,
-      configured: false,
-      spreadsheetUrl: settings.value.feishuSourceUrl,
-      totalRows: 0,
-      actionableRows: 0,
-      trackedRows: 0,
-      importedPlans: 0,
-    };
-  }
-}
-
-async function runFeishuSourceSync(): Promise<void> {
-  if (feishuSourceState.value === "syncing") return;
-  feishuSourceState.value = "syncing";
-  feishuSourceMessage.value = "正在检查投递记录表...";
-  try {
-    await updateSettings(settings.value);
-    feishuSourceMessage.value = await syncFeishuSourceNow();
-    feishuSourceState.value = "success";
-    await Promise.all([refreshFeishuSourceStatus(), refreshFeishuStatus()]);
-  } catch (error) {
-    feishuSourceMessage.value = errorMessage(error);
-    feishuSourceState.value = "error";
-    await refreshFeishuSourceStatus();
-  }
-}
-
-async function openFeishuSource(): Promise<void> {
-  if (!settings.value.feishuSourceUrl) return;
-  await openExternalLink(settings.value.feishuSourceUrl);
 }
 
 async function exportData(): Promise<void> {
@@ -1350,34 +1298,6 @@ function typeLabel(type: string): string {
 
         <div class="settings-section">
           <div class="settings-heading">
-            <div><h2>飞书投递记录</h2><p>由许科AI助手维护求职记录，不从表格反向创建计划。</p></div>
-            <label class="toggle-control">
-              <input v-model="settings.feishuSourceEnabled" type="checkbox" />
-              <span aria-hidden="true" />
-              <strong>{{ settings.feishuSourceEnabled ? "已开启" : "已关闭" }}</strong>
-            </label>
-          </div>
-          <div class="form-grid" :class="{ muted: !settings.feishuSourceEnabled }">
-            <label class="wide-field"><span>目标表格链接</span><input v-model.trim="settings.feishuSourceUrl" type="url" :disabled="!settings.feishuSourceEnabled" placeholder="https://your-team.feishu.cn/sheets/..." /></label>
-            <label><span>写入字段</span><input value="状态、公司/事项、岗位/方向、链接、备注" type="text" readonly /></label>
-            <label><span>写入策略</span><input value="链接或公司+岗位去重，命中则更新" type="text" readonly /></label>
-          </div>
-          <div class="settings-actions">
-            <button class="secondary-button" type="button" :disabled="!settings.feishuSourceEnabled || !settings.feishuSourceUrl || feishuSourceState === 'syncing'" @click="runFeishuSourceSync">
-              <LoaderCircle v-if="feishuSourceState === 'syncing'" class="spin" :size="16" />
-              <Search v-else :size="16" />检查连接
-            </button>
-            <button v-if="settings.feishuSourceUrl" class="secondary-button" type="button" @click="openFeishuSource">
-              <Table2 :size="16" />打开投递表<ExternalLink :size="14" />
-            </button>
-            <button class="primary-button" type="button" @click="saveSettings"><Check :size="16" />保存设置</button>
-          </div>
-          <p v-if="feishuSourceMessage" class="connection-result" :class="feishuSourceState">{{ feishuSourceMessage }}</p>
-          <p v-else-if="feishuSourceStatus.lastError" class="connection-result error">{{ feishuSourceStatus.lastError }}</p>
-        </div>
-
-        <div class="settings-section">
-          <div class="settings-heading">
             <div><h2>飞书计划表</h2><p>维护真正的待办，并双向同步已有计划的完成状态。</p></div>
             <label class="toggle-control">
               <input v-model="settings.feishuSyncEnabled" type="checkbox" />
@@ -1414,7 +1334,7 @@ function typeLabel(type: string): string {
             </label>
           </div>
           <div class="form-grid" :class="{ muted: !settings.feishuTaskRemindersEnabled }">
-            <label><span>任务负责人</span><input value="投递记录表所有者" type="text" readonly /></label>
+            <label><span>任务负责人</span><input value="已配置的飞书负责人" type="text" readonly /></label>
             <label><span>提醒时间</span><input value="计划开始前 3 小时" type="text" readonly /></label>
             <label><span>同步队列</span><input :value="`${feishuStatus.pendingTaskReminders} 条待同步`" type="text" readonly /></label>
           </div>

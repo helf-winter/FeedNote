@@ -1587,7 +1587,7 @@ impl Database {
         match settings_json {
             Some(value) => {
                 let settings = serde_json::from_str(&value).unwrap_or_default();
-                let (settings, migrated) = migrate_legacy_llm_settings(settings);
+                let (settings, migrated) = migrate_settings(settings);
                 if migrated {
                     connection.execute(
                         "UPDATE settings SET value = ?1 WHERE key = 'app'",
@@ -2615,6 +2615,15 @@ fn migrate_legacy_llm_settings(mut settings: AppSettings) -> (AppSettings, bool)
     }
 }
 
+fn migrate_settings(settings: AppSettings) -> (AppSettings, bool) {
+    let (mut settings, mut changed) = migrate_legacy_llm_settings(settings);
+    if settings.feishu_source_enabled {
+        settings.feishu_source_enabled = false;
+        changed = true;
+    }
+    (settings, changed)
+}
+
 pub fn validate_embedding_endpoint(endpoint: &str) -> AppResult<()> {
     let normalized = endpoint.trim().trim_end_matches('/');
     let local = normalized.starts_with("http://127.0.0.1:")
@@ -3333,6 +3342,22 @@ mod tests {
         assert!(changed);
         assert_eq!(migrated.llm_endpoint, DEFAULT_LLM_ENDPOINT);
         assert_eq!(migrated.llm_model, DEFAULT_LLM_MODEL);
+    }
+
+    #[test]
+    fn legacy_application_sheet_setting_is_permanently_disabled() {
+        let mut legacy = AppSettings::default();
+        legacy.feishu_source_enabled = true;
+        legacy.feishu_source_url = "https://team.feishu.cn/sheets/abc123".to_string();
+
+        let (migrated, changed) = migrate_settings(legacy);
+
+        assert!(changed);
+        assert!(!migrated.feishu_source_enabled);
+        assert_eq!(
+            migrated.feishu_source_url,
+            "https://team.feishu.cn/sheets/abc123"
+        );
     }
 
     #[test]

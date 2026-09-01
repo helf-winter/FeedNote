@@ -25,7 +25,6 @@ use crate::{
 };
 
 const PLAN_ROUTE_THRESHOLD: f64 = 0.68;
-const APPLICATION_ROUTE_THRESHOLD: f64 = 0.82;
 
 #[tauri::command]
 pub fn create_feed(
@@ -135,6 +134,7 @@ pub fn update_settings(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
+    let _legacy_source_requested = input.feishu_source_enabled;
     let settings = AppSettings {
         launch_at_login: input.launch_at_login,
         ai_enabled: input.ai_enabled,
@@ -148,7 +148,9 @@ pub fn update_settings(
         mobile_reminder_minutes: input.mobile_reminder_minutes,
         feishu_sync_enabled: input.feishu_sync_enabled,
         feishu_task_reminders_enabled: input.feishu_task_reminders_enabled,
-        feishu_source_enabled: input.feishu_source_enabled,
+        // Application tracking is user-maintained and cannot be re-enabled by
+        // stale frontend builds or direct command invocation.
+        feishu_source_enabled: false,
         feishu_source_url: input.feishu_source_url,
         feishu_secret_enabled: input.feishu_secret_enabled,
     };
@@ -242,7 +244,8 @@ pub fn get_feishu_source_status(state: State<'_, AppState>) -> AppResult<FeishuS
 
 #[tauri::command]
 pub async fn sync_feishu_source_now(state: State<'_, AppState>) -> AppResult<String> {
-    feishu_sync::check_application_target(&state.database, &state.secrets_path).await
+    let _ = state;
+    Ok("投递记录表已改为由用户自行维护，FeedNote 不再检查或写入".to_string())
 }
 
 #[tauri::command]
@@ -668,11 +671,6 @@ pub async fn commit_capture(
     )
     .await?;
 
-    let application_route_accepted = routing.write_application_record
-        && routing.application_confidence >= APPLICATION_ROUTE_THRESHOLD;
-    let application_channel_ready =
-        settings.feishu_source_enabled && !settings.feishu_source_url.trim().is_empty();
-    let should_write_application = application_route_accepted && application_channel_ready;
     let should_create_plan = routing.create_plan && routing.plan_confidence >= PLAN_ROUTE_THRESHOLD;
     let validated_plan_time = if should_create_plan {
         let proposal = routing.plan.as_ref().ok_or_else(|| {
@@ -681,20 +679,6 @@ pub async fn commit_capture(
         let scheduled_at = parse_scheduled_at(proposal.scheduled_for.as_deref())?;
         crate::db::validate_plan_proposal(proposal, scheduled_at)?;
         Some(scheduled_at)
-    } else {
-        None
-    };
-    let application_record = if should_write_application {
-        Some(
-            feishu_sync::write_application_record(
-                &state.database,
-                &state.secrets_path,
-                routing.application_record.as_ref().ok_or_else(|| {
-                    crate::error::AppError::AiInvalid("投递记录路由缺少结构化内容".to_string())
-                })?,
-            )
-            .await?,
-        )
     } else {
         None
     };
@@ -728,31 +712,19 @@ pub async fn commit_capture(
         .pending_capture
         .lock()
         .expect("pending capture lock poisoned") = None;
-    let destination = match (application_record.is_some(), plan.is_some()) {
-        (true, true) => "application_and_plan",
-        (true, false) => "application",
-        (false, true) => "plan",
-        (false, false) => "memory",
-    };
-    let mut message = match destination {
-        "application_and_plan" => "已写入投递记录，并创建桌面计划",
-        "application" => "已写入飞书投递记录表",
+    let destination = if plan.is_some() { "plan" } else { "memory" };
+    let message = match destination {
         "plan" => "已创建桌面计划",
-        _ if application_route_accepted => "已保存到记忆库",
-        _ if routing.write_application_record => "投递判断未达到写入阈值，已安全保存到记忆库",
         _ if routing.create_plan => "计划判断未达到创建阈值，已安全保存到记忆库",
-        _ => "未识别为待办或投递记录，已保存到记忆库",
+        _ => "未识别为待办，已保存到记忆库",
     }
     .to_string();
-    if application_route_accepted && !application_channel_ready {
-        message.push_str("；投递记录同步未开启，本次未写入投递表");
-    }
     let needs_clarification = plan.is_some() && scheduled_at.is_none();
     Ok(CaptureCommitResult {
         destination: destination.to_string(),
         message,
         plan,
-        application_record,
+        application_record: None,
         needs_clarification,
     })
 }
