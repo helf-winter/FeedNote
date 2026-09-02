@@ -28,6 +28,9 @@ import {
 } from "../api";
 
 const DOCK_OPACITY_KEY = "feednote.plan-dock.opacity";
+const DOCK_WIDTH_KEY = "feednote.plan-dock.width";
+const DOCK_DEFAULT_WIDTH = 380;
+const DOCK_MIN_WIDTH = 320;
 
 const expanded = ref(false);
 const plans = ref<PlanItem[]>([]);
@@ -45,6 +48,7 @@ const visiblePlans = computed(() =>
   tagFilter.value === "all" ? plans.value : plans.value.filter((plan) => plan.tag === tagFilter.value),
 );
 let unlisten: UnlistenFn | undefined;
+let unlistenResize: UnlistenFn | undefined;
 let collapsedPointer: { id: number; x: number; y: number } | undefined;
 let dragDepth = 0;
 let dropMessageTimer: number | undefined;
@@ -58,13 +62,26 @@ function saveDockOpacity(): void {
   localStorage.setItem(DOCK_OPACITY_KEY, String(dockOpacity.value));
 }
 
+function loadDockWidth(): number {
+  const stored = Number.parseInt(localStorage.getItem(DOCK_WIDTH_KEY) ?? "", 10);
+  return Number.isFinite(stored) && stored >= DOCK_MIN_WIDTH ? stored : DOCK_DEFAULT_WIDTH;
+}
+
+function saveDockWidth(width: number): void {
+  if (width >= DOCK_MIN_WIDTH) localStorage.setItem(DOCK_WIDTH_KEY, String(Math.round(width)));
+}
+
 onMounted(async () => {
   await refresh();
   unlisten = await listen("plans-changed", refresh);
+  unlistenResize = await getCurrentWindow().onResized(({ payload }) => {
+    if (expanded.value) saveDockWidth(payload.width);
+  });
 });
 
 onBeforeUnmount(() => {
   unlisten?.();
+  unlistenResize?.();
   if (dropMessageTimer) window.clearTimeout(dropMessageTimer);
 });
 
@@ -115,8 +132,14 @@ function showDropMessage(message: string): void {
 }
 
 async function toggle(): Promise<void> {
-  expanded.value = await togglePlanDock();
+  if (expanded.value) saveDockWidth((await getCurrentWindow().innerSize()).width);
+  expanded.value = await togglePlanDock(loadDockWidth());
   if (expanded.value) await refresh();
+}
+
+async function startDockResize(direction: "East" | "West", event: MouseEvent): Promise<void> {
+  if (event.button !== 0) return;
+  await getCurrentWindow().startResizeDragging(direction);
 }
 
 async function refresh(): Promise<void> {
@@ -276,6 +299,18 @@ function formatTime(timestamp?: number): string {
     @dragleave="leaveTextDrop"
     @drop="receiveTextDrop"
   >
+    <span
+      class="dock-resize-handle dock-resize-handle-left"
+      title="向左或向右拖动调节宽度"
+      aria-hidden="true"
+      @mousedown.stop.prevent="startDockResize('West', $event)"
+    />
+    <span
+      class="dock-resize-handle dock-resize-handle-right"
+      title="向左或向右拖动调节宽度"
+      aria-hidden="true"
+      @mousedown.stop.prevent="startDockResize('East', $event)"
+    />
     <header @mousedown="startDockDrag">
       <div class="dock-heading">
         <span class="dock-heading-icon"><CalendarClock :size="17" /></span>

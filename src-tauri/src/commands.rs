@@ -25,6 +25,10 @@ use crate::{
 };
 
 const PLAN_ROUTE_THRESHOLD: f64 = 0.68;
+const PLAN_DOCK_DEFAULT_WIDTH: u32 = 380;
+const PLAN_DOCK_MIN_WIDTH: u32 = 320;
+const PLAN_DOCK_HEIGHT: u32 = 520;
+const PLAN_DOCK_COLLAPSED_SIZE: u32 = 58;
 
 #[tauri::command]
 pub fn create_feed(
@@ -820,10 +824,14 @@ pub fn set_plan_done(
 }
 
 #[tauri::command]
-pub fn toggle_plan_dock(app: AppHandle, state: State<'_, AppState>) -> AppResult<bool> {
+pub fn toggle_plan_dock(
+    expanded_width: Option<u32>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<bool> {
     let expanded = !state.dock_expanded.load(Ordering::Relaxed);
     state.dock_expanded.store(expanded, Ordering::Relaxed);
-    resize_plan_dock(&app, expanded);
+    resize_plan_dock(&app, expanded, expanded_width);
     Ok(expanded)
 }
 
@@ -943,16 +951,33 @@ fn close_capture_menu(app: &AppHandle, state: &AppState) {
     state.selection_suppressed.store(false, Ordering::Relaxed);
 }
 
-pub(crate) fn resize_plan_dock(app: &AppHandle, expanded: bool) {
+pub(crate) fn resize_plan_dock(app: &AppHandle, expanded: bool, expanded_width: Option<u32>) {
     let Some(window) = app.get_webview_window("plan-dock") else {
         return;
     };
     let old_position = window.outer_position().ok();
     let old_size = window.outer_size().ok();
+    let monitor_width = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.work_area().size.width)
+        .unwrap_or(1_920);
+    let max_width = monitor_width.saturating_sub(32).max(PLAN_DOCK_MIN_WIDTH);
     let (width, height) = if expanded {
-        (380_u32, 520_u32)
+        let width = plan_dock_width(expanded_width, max_width);
+        let _ = window.set_min_size(Some(PhysicalSize::new(
+            PLAN_DOCK_MIN_WIDTH,
+            PLAN_DOCK_HEIGHT,
+        )));
+        let _ = window.set_max_size(Some(PhysicalSize::new(max_width, PLAN_DOCK_HEIGHT)));
+        let _ = window.set_resizable(true);
+        (width, PLAN_DOCK_HEIGHT)
     } else {
-        (58, 58)
+        let _ = window.set_min_size::<PhysicalSize<u32>>(None);
+        let _ = window.set_max_size::<PhysicalSize<u32>>(None);
+        let _ = window.set_resizable(false);
+        (PLAN_DOCK_COLLAPSED_SIZE, PLAN_DOCK_COLLAPSED_SIZE)
     };
     let _ = window.set_size(PhysicalSize::new(width, height));
     if let (Some(position), Some(size)) = (old_position, old_size) {
@@ -962,12 +987,18 @@ pub(crate) fn resize_plan_dock(app: &AppHandle, expanded: bool) {
     let _ = window.show();
 }
 
+fn plan_dock_width(requested: Option<u32>, max_width: u32) -> u32 {
+    requested
+        .unwrap_or(PLAN_DOCK_DEFAULT_WIDTH)
+        .clamp(PLAN_DOCK_MIN_WIDTH, max_width.max(PLAN_DOCK_MIN_WIDTH))
+}
+
 pub(crate) fn initialize_plan_dock(app: &AppHandle) {
     let Some(window) = app.get_webview_window("plan-dock") else {
         return;
     };
-    let width = 58_u32;
-    let height = 58_u32;
+    let width = PLAN_DOCK_COLLAPSED_SIZE;
+    let height = PLAN_DOCK_COLLAPSED_SIZE;
     let _ = window.set_size(PhysicalSize::new(width, height));
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let origin = monitor.position();
@@ -1140,6 +1171,14 @@ mod tests {
             proposal.scheduled_for.as_deref(),
             Some("2026-09-01T09:30:00+08:00")
         );
+    }
+
+    #[test]
+    fn plan_dock_width_uses_saved_value_with_safe_bounds() {
+        assert_eq!(plan_dock_width(None, 1_920), PLAN_DOCK_DEFAULT_WIDTH);
+        assert_eq!(plan_dock_width(Some(280), 1_920), PLAN_DOCK_MIN_WIDTH);
+        assert_eq!(plan_dock_width(Some(720), 1_920), 720);
+        assert_eq!(plan_dock_width(Some(2_400), 1_888), 1_888);
     }
 
     #[test]

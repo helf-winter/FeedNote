@@ -405,6 +405,47 @@
     inset 0 0 0 2px rgb(240 79 135 / 18%);
 }
 
+.dock-resize-handle {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: ew-resize;
+}
+
+.dock-resize-handle::after {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  width: 2px;
+  background: rgb(31 126 117 / 46%);
+  border-radius: 1px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  content: "";
+}
+
+.dock-resize-handle:hover::after {
+  opacity: 1;
+}
+
+.dock-resize-handle-left {
+  left: 0;
+}
+
+.dock-resize-handle-left::after {
+  left: 0;
+}
+
+.dock-resize-handle-right {
+  right: 0;
+}
+
+.dock-resize-handle-right::after {
+  right: 0;
+}
+
 .plan-dock-panel > header {
   justify-content: space-between;
   height: 66px;
