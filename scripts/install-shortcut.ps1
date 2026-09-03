@@ -1,0 +1,25 @@
+$ErrorActionPreference = "Stop"
+
+$FeedNoteRoot = Split-Path -Parent $PSScriptRoot
+$LauncherPath = Join-Path $PSScriptRoot "launch-feednote.ps1"
+$InstalledPath = Join-Path $FeedNoteRoot "FeedNote.exe"
+$DesktopPath = [Environment]::GetFolderPath("Desktop")
+$ExistingPath = Join-Path $DesktopPath "FeedNote.exe.lnk"
+$ShortcutPath = if (Test-Path -LiteralPath $ExistingPath) {
+    $ExistingPath
+} else {
+    Join-Path $DesktopPath "FeedNote.lnk"
+}
+$PowerShellPath = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($ShortcutPath)
+$shortcut.TargetPath = $PowerShellPath
+$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LauncherPath`""
+$shortcut.WorkingDirectory = $FeedNoteRoot
+$shortcut.IconLocation = "$InstalledPath,0"
+$shortcut.Description = "启动 FeedNote 并检查本地更新"
+$shortcut.WindowStyle = 7
+$shortcut.Save()
+
+Write-Host "FeedNote desktop launcher installed: $ShortcutPath"

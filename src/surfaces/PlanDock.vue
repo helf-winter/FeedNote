@@ -29,8 +29,11 @@ import {
 
 const DOCK_OPACITY_KEY = "feednote.plan-dock.opacity";
 const DOCK_WIDTH_KEY = "feednote.plan-dock.width";
+const DOCK_HEIGHT_KEY = "feednote.plan-dock.height";
 const DOCK_DEFAULT_WIDTH = 380;
 const DOCK_MIN_WIDTH = 320;
+const DOCK_DEFAULT_HEIGHT = 520;
+const DOCK_MIN_HEIGHT = 300;
 
 const expanded = ref(false);
 const plans = ref<PlanItem[]>([]);
@@ -71,11 +74,23 @@ function saveDockWidth(width: number): void {
   if (width >= DOCK_MIN_WIDTH) localStorage.setItem(DOCK_WIDTH_KEY, String(Math.round(width)));
 }
 
+function loadDockHeight(): number {
+  const stored = Number.parseInt(localStorage.getItem(DOCK_HEIGHT_KEY) ?? "", 10);
+  return Number.isFinite(stored) && stored >= DOCK_MIN_HEIGHT ? stored : DOCK_DEFAULT_HEIGHT;
+}
+
+function saveDockHeight(height: number): void {
+  if (height >= DOCK_MIN_HEIGHT) localStorage.setItem(DOCK_HEIGHT_KEY, String(Math.round(height)));
+}
+
 onMounted(async () => {
   await refresh();
   unlisten = await listen("plans-changed", refresh);
   unlistenResize = await getCurrentWindow().onResized(({ payload }) => {
-    if (expanded.value) saveDockWidth(payload.width);
+    if (expanded.value) {
+      saveDockWidth(payload.width);
+      saveDockHeight(payload.height);
+    }
   });
 });
 
@@ -132,12 +147,19 @@ function showDropMessage(message: string): void {
 }
 
 async function toggle(): Promise<void> {
-  if (expanded.value) saveDockWidth((await getCurrentWindow().innerSize()).width);
-  expanded.value = await togglePlanDock(loadDockWidth());
+  if (expanded.value) {
+    const size = await getCurrentWindow().innerSize();
+    saveDockWidth(size.width);
+    saveDockHeight(size.height);
+  }
+  expanded.value = await togglePlanDock(loadDockWidth(), loadDockHeight());
   if (expanded.value) await refresh();
 }
 
-async function startDockResize(direction: "East" | "West", event: MouseEvent): Promise<void> {
+async function startDockResize(
+  direction: "East" | "West" | "North" | "South",
+  event: MouseEvent,
+): Promise<void> {
   if (event.button !== 0) return;
   await getCurrentWindow().startResizeDragging(direction);
 }
@@ -310,6 +332,18 @@ function formatTime(timestamp?: number): string {
       title="向左或向右拖动调节宽度"
       aria-hidden="true"
       @mousedown.stop.prevent="startDockResize('East', $event)"
+    />
+    <span
+      class="dock-resize-handle dock-resize-handle-top"
+      title="向上或向下拖动调节高度"
+      aria-hidden="true"
+      @mousedown.stop.prevent="startDockResize('North', $event)"
+    />
+    <span
+      class="dock-resize-handle dock-resize-handle-bottom"
+      title="向上或向下拖动调节高度"
+      aria-hidden="true"
+      @mousedown.stop.prevent="startDockResize('South', $event)"
     />
     <header @mousedown="startDockDrag">
       <div class="dock-heading">

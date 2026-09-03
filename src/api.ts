@@ -642,8 +642,11 @@ export async function setPlanDone(planId: string, done: boolean): Promise<PlanIt
   throw new Error("浏览器预览不提供计划状态修改");
 }
 
-export async function togglePlanDock(expandedWidth?: number): Promise<boolean> {
-  return invoke("toggle_plan_dock", { expandedWidth });
+export async function togglePlanDock(
+  expandedWidth?: number,
+  expandedHeight?: number,
+): Promise<boolean> {
+  return invoke("toggle_plan_dock", { expandedWidth, expandedHeight });
 }
 
 export async function showPlanDockMenu(): Promise<void> {

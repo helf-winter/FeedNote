@@ -1,3 +1,10 @@
+$ErrorActionPreference = "Stop"
+
 . (Join-Path $PSScriptRoot "env.ps1")
-Set-Location (Split-Path -Parent $PSScriptRoot)
+$FeedNoteRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $FeedNoteRoot
+
 npm run tauri:build
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+& (Join-Path $PSScriptRoot "stage-release.ps1")
