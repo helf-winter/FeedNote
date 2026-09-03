@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 
-export type Page = "inbox" | "memories" | "memo" | "plans" | "secrets" | "review" | "settings";
+export type Page =
+  "inbox" | "memories" | "memo" | "plans" | "secrets" | "review" | "settings";
 
 export interface FeedEvent {
   id: string;
@@ -232,7 +233,8 @@ export interface CaptureCommitResult {
   needsClarification: boolean;
 }
 
-const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const isTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const MOCK_KEY = "feednote-browser-preview-v1";
 
 interface MockState {
@@ -248,7 +250,8 @@ function initialMockState(): MockState {
     feeds: [
       {
         id: "demo-feed-1",
-        rawContent: "FeedNote 的原始输入必须永久可追溯，AI 只能创建新的理解版本。",
+        rawContent:
+          "FeedNote 的原始输入必须永久可追溯，AI 只能创建新的理解版本。",
         sourceType: "manual",
         processingStatus: "classified",
         createdAt: now - 1000 * 60 * 18,
@@ -355,7 +358,9 @@ function titleFrom(content: string): string {
   return first.length > 36 ? `${first.slice(0, 36)}...` : first;
 }
 
-export async function createFeed(content: string): Promise<{ feedId: string; memoryId: string }> {
+export async function createFeed(
+  content: string,
+): Promise<{ feedId: string; memoryId: string }> {
   if (isTauri) {
     return invoke("create_feed", { input: { content, sourceType: "manual" } });
   }
@@ -388,11 +393,17 @@ export async function createFeed(content: string): Promise<{ feedId: string; mem
 }
 
 export async function listFeeds(query = ""): Promise<FeedEvent[]> {
-  if (isTauri) return invoke("list_feeds", { query: query || null, limit: 200 });
-  return getMock().feeds.filter((feed) => feed.rawContent.toLowerCase().includes(query.toLowerCase()));
+  if (isTauri)
+    return invoke("list_feeds", { query: query || null, limit: 200 });
+  return getMock().feeds.filter((feed) =>
+    feed.rawContent.toLowerCase().includes(query.toLowerCase()),
+  );
 }
 
-export async function listMemories(query = "", memoryType = ""): Promise<MemorySummary[]> {
+export async function listMemories(
+  query = "",
+  memoryType = "",
+): Promise<MemorySummary[]> {
   if (isTauri) {
     return invoke("list_memories", {
       query: query || null,
@@ -401,9 +412,10 @@ export async function listMemories(query = "", memoryType = ""): Promise<MemoryS
     });
   }
   return getMock().memories.filter((memory) => {
-    const matchesQuery = `${memory.title} ${memory.body} ${memory.summary ?? ""}`
-      .toLowerCase()
-      .includes(query.toLowerCase());
+    const matchesQuery =
+      `${memory.title} ${memory.body} ${memory.summary ?? ""}`
+        .toLowerCase()
+        .includes(query.toLowerCase());
     return matchesQuery && (!memoryType || memory.memoryType === memoryType);
   });
 }
@@ -423,9 +435,12 @@ export async function getMemory(memoryId: string): Promise<MemoryDetail> {
         confidence: memory.confidence,
         authorType: memory.authorType,
         modelInfo: memory.authorType === "ai" ? "deepseek-v4-flash" : undefined,
-        changeReason: memory.authorType === "ai" ? "AI 自动分类与整理" : "原始投喂",
+        changeReason:
+          memory.authorType === "ai" ? "AI 自动分类与整理" : "原始投喂",
         createdAt: memory.updatedAt,
-        sourceEventIds: getMock().feeds.filter((feed) => feed.memoryId === memory.id).map((feed) => feed.id),
+        sourceEventIds: getMock()
+          .feeds.filter((feed) => feed.memoryId === memory.id)
+          .map((feed) => feed.id),
       },
     ],
   };
@@ -436,7 +451,10 @@ export async function listReviews(): Promise<ReviewItem[]> {
   return getMock().reviews.filter((review) => review.status === "pending");
 }
 
-export async function resolveReview(reviewId: string, accept: boolean): Promise<void> {
+export async function resolveReview(
+  reviewId: string,
+  accept: boolean,
+): Promise<void> {
   if (isTauri) return invoke("resolve_review", { reviewId, accept });
   const state = getMock();
   const review = state.reviews.find((item) => item.id === reviewId);
@@ -445,7 +463,9 @@ export async function resolveReview(reviewId: string, accept: boolean): Promise<
   const feed = state.feeds.find((item) => item.id === review.payload.feedId);
   if (feed) feed.processingStatus = review.status;
   if (accept && review.proposedAction !== "ask" && review.payload.memoryId) {
-    const memory = state.memories.find((item) => item.id === review.payload.memoryId);
+    const memory = state.memories.find(
+      (item) => item.id === review.payload.memoryId,
+    );
     if (memory) {
       memory.memoryType = review.payload.memoryType ?? memory.memoryType;
       memory.title = review.payload.title ?? memory.title;
@@ -460,20 +480,30 @@ export async function resolveReview(reviewId: string, accept: boolean): Promise<
 
 export async function requestDeleteFeed(feedId: string): Promise<string> {
   if (isTauri) {
-    const confirmation = await invoke<{ token: string; expiresAt: number }>("request_delete_feed", { feedId });
+    const confirmation = await invoke<{ token: string; expiresAt: number }>(
+      "request_delete_feed",
+      { feedId },
+    );
     return confirmation.token;
   }
   return `preview-confirm-${feedId}`;
 }
 
-export async function deleteFeed(feedId: string, confirmationToken: string): Promise<void> {
+export async function deleteFeed(
+  feedId: string,
+  confirmationToken: string,
+): Promise<void> {
   if (isTauri) return invoke("delete_feed", { feedId, confirmationToken });
-  if (confirmationToken !== `preview-confirm-${feedId}`) throw new Error("删除确认已失效");
+  if (confirmationToken !== `preview-confirm-${feedId}`)
+    throw new Error("删除确认已失效");
   const state = getMock();
   const feed = state.feeds.find((item) => item.id === feedId);
   state.feeds = state.feeds.filter((item) => item.id !== feedId);
-  if (feed?.memoryId) state.memories = state.memories.filter((item) => item.id !== feed.memoryId);
-  state.reviews = state.reviews.filter((item) => item.payload.feedId !== feedId);
+  if (feed?.memoryId)
+    state.memories = state.memories.filter((item) => item.id !== feed.memoryId);
+  state.reviews = state.reviews.filter(
+    (item) => item.payload.feedId !== feedId,
+  );
   setMock(state);
 }
 
@@ -483,8 +513,11 @@ export async function getStats(): Promise<Stats> {
   return {
     totalFeeds: state.feeds.length,
     totalMemories: state.memories.length,
-    pendingReviews: state.reviews.filter((item) => item.status === "pending").length,
-    pendingProcessing: state.feeds.filter((item) => ["pending", "processing"].includes(item.processingStatus)).length,
+    pendingReviews: state.reviews.filter((item) => item.status === "pending")
+      .length,
+    pendingProcessing: state.feeds.filter((item) =>
+      ["pending", "processing"].includes(item.processingStatus),
+    ).length,
   };
 }
 
@@ -498,18 +531,33 @@ export async function updateSettings(settings: AppSettings): Promise<void> {
   const llmEndpoint = settings.llmEndpoint.replace(/\/$/, "");
   const embeddingEndpoint = settings.embeddingEndpoint.replace(/\/$/, "");
   const local = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
-  if (llmEndpoint !== "https://api.deepseek.com/anthropic" && !local.test(llmEndpoint)) {
+  if (
+    llmEndpoint !== "https://api.deepseek.com/anthropic" &&
+    !local.test(llmEndpoint)
+  ) {
     throw new Error("只允许连接已授权的 DeepSeek Anthropic 地址或本机模型服务");
   }
-  if (embeddingEndpoint !== "https://open.bigmodel.cn/api/paas/v4" && !local.test(embeddingEndpoint)) {
+  if (
+    embeddingEndpoint !== "https://open.bigmodel.cn/api/paas/v4" &&
+    !local.test(embeddingEndpoint)
+  ) {
     throw new Error("只允许连接已授权的智谱 Embedding 地址或本机服务");
   }
   if (settings.feishuSourceEnabled || settings.feishuSourceUrl) {
     const source = new URL(settings.feishuSourceUrl);
-    const allowedHost = source.hostname === "feishu.cn" || source.hostname.endsWith(".feishu.cn")
-      || source.hostname === "larksuite.com" || source.hostname.endsWith(".larksuite.com");
-    if (source.protocol !== "https:" || !allowedHost || !source.pathname.includes("/sheets/")) {
-      throw new Error("飞书来源只允许 feishu.cn 或 larksuite.com 的 /sheets/ HTTPS 链接");
+    const allowedHost =
+      source.hostname === "feishu.cn" ||
+      source.hostname.endsWith(".feishu.cn") ||
+      source.hostname === "larksuite.com" ||
+      source.hostname.endsWith(".larksuite.com");
+    if (
+      source.protocol !== "https:" ||
+      !allowedHost ||
+      !source.pathname.includes("/sheets/")
+    ) {
+      throw new Error(
+        "飞书来源只允许 feishu.cn 或 larksuite.com 的 /sheets/ HTTPS 链接",
+      );
     }
   }
   const state = getMock();
@@ -530,7 +578,9 @@ export async function processFeed(feedId: string): Promise<ProcessResult> {
     const feed = state.feeds.find((item) => item.id === feedId);
     const memory = state.memories.find((item) => item.id === feed?.memoryId);
     if (feed && memory) {
-      const taskLike = /要|需要|完成|记得|明天|周[一二三四五六日]/.test(feed.rawContent);
+      const taskLike = /要|需要|完成|记得|明天|周[一二三四五六日]/.test(
+        feed.rawContent,
+      );
       memory.memoryType = taskLike ? "Task" : "Knowledge";
       memory.title = titleFrom(feed.rawContent);
       memory.summary = feed.rawContent;
@@ -543,7 +593,9 @@ export async function processFeed(feedId: string): Promise<ProcessResult> {
   }
   return {
     status: settings.aiEnabled ? "classified" : "disabled",
-    message: settings.aiEnabled ? "已自动理解并归入记忆" : "AI 整理已关闭，原始记录已安全保存",
+    message: settings.aiEnabled
+      ? "已自动理解并归入记忆"
+      : "AI 整理已关闭，原始记录已安全保存",
   };
 }
 
@@ -551,7 +603,9 @@ export async function prepareCapture(): Promise<SelectionSnapshot> {
   return invoke("prepare_capture");
 }
 
-export async function prepareDragCapture(text: string): Promise<SelectionSnapshot> {
+export async function prepareDragCapture(
+  text: string,
+): Promise<SelectionSnapshot> {
   return invoke("prepare_drag_capture", { text });
 }
 
@@ -568,7 +622,10 @@ export async function listMemos(limit = 500): Promise<MemoItem[]> {
   return [];
 }
 
-export async function updateMemo(memoId: string, content: string): Promise<MemoItem> {
+export async function updateMemo(
+  memoId: string,
+  content: string,
+): Promise<MemoItem> {
   if (isTauri) return invoke("update_memo", { memoId, content });
   throw new Error("浏览器预览不提供备忘录编辑");
 }
@@ -606,12 +663,24 @@ export async function listSecretItems(): Promise<SecretItem[]> {
   return [];
 }
 
-export async function updateSecretItem(secretId: string, input: UpdateSecretInput): Promise<SecretItem> {
+export async function updateSecretItem(
+  secretId: string,
+  input: UpdateSecretInput,
+): Promise<SecretItem> {
   if (isTauri) return invoke("update_secret_item", { secretId, input });
-  return { id: secretId, sourceTitle: "", createdAt: Date.now(), updatedAt: Date.now(), ...input };
+  return {
+    id: secretId,
+    sourceTitle: "",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    ...input,
+  };
 }
 
-export async function deleteSecretItem(secretId: string, password: string): Promise<void> {
+export async function deleteSecretItem(
+  secretId: string,
+  password: string,
+): Promise<void> {
   if (isTauri) return invoke("delete_secret_item", { secretId, password });
 }
 
@@ -623,7 +692,10 @@ export async function undoSecretStash(secretId: string): Promise<void> {
   return invoke("undo_secret_stash", { secretId });
 }
 
-export async function resolvePlanTime(planId: string, answer: string): Promise<CaptureCommitResult> {
+export async function resolvePlanTime(
+  planId: string,
+  answer: string,
+): Promise<CaptureCommitResult> {
   return invoke("resolve_plan_time", { planId, answer });
 }
 
@@ -632,12 +704,18 @@ export async function listPlans(includeDone = false): Promise<PlanItem[]> {
   return [];
 }
 
-export async function updatePlan(planId: string, input: UpdatePlanInput): Promise<PlanItem> {
+export async function updatePlan(
+  planId: string,
+  input: UpdatePlanInput,
+): Promise<PlanItem> {
   if (isTauri) return invoke("update_plan", { planId, input });
   throw new Error("浏览器预览不提供计划编辑");
 }
 
-export async function setPlanDone(planId: string, done: boolean): Promise<PlanItem> {
+export async function setPlanDone(
+  planId: string,
+  done: boolean,
+): Promise<PlanItem> {
   if (isTauri) return invoke("set_plan_done", { planId, done });
   throw new Error("浏览器预览不提供计划状态修改");
 }
@@ -662,7 +740,9 @@ export async function openExternalLink(url: string): Promise<void> {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-export async function testMobilePush(provider: AppSettings["mobilePushProvider"]): Promise<string> {
+export async function testMobilePush(
+  provider: AppSettings["mobilePushProvider"],
+): Promise<string> {
   if (isTauri) return invoke("test_mobile_push", { provider });
   throw new Error("浏览器预览不会读取本机推送密钥，请在桌面应用中测试");
 }
@@ -738,7 +818,13 @@ export async function exportArchive(): Promise<boolean> {
   }
   const state = getMock();
   const blob = new Blob(
-    [JSON.stringify({ schemaVersion: 1, exportedAt: new Date().toISOString(), ...state }, null, 2)],
+    [
+      JSON.stringify(
+        { schemaVersion: 1, exportedAt: new Date().toISOString(), ...state },
+        null,
+        2,
+      ),
+    ],
     { type: "application/json" },
   );
   const url = URL.createObjectURL(blob);

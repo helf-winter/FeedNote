@@ -234,7 +234,8 @@ Feed
 建议技术栈：
 
 - 桌面容器：Tauri 2；
-- 前端：Vue 3 + TypeScript；
+- 前端：React 18 + TypeScript；
+- 状态管理：Redux Toolkit + React Redux；
 - 本地数据库：SQLite；
 - 全文检索：SQLite FTS5；
 - 模型接入：可替换 Provider，当前实现 DeepSeek Anthropic 兼容接口；
@@ -551,12 +552,10 @@ MVP 目标：
 ## 18. 工程目录建议
 
 ```text
-src/                         Vue UI
-src/components/              通用界面组件
-src/features/feed/           快速投喂
-src/features/memory/         记忆浏览与版本
-src/features/review/         待澄清队列
-src/features/search/         检索与召回
+src/                         React UI
+src/store/                   Redux Toolkit 领域快照、异步加载与类型化 hooks
+src/surfaces/                选区浮球、处理弹窗与桌面计划坞
+src/api.ts                   Tauri 命令与浏览器预览适配层
 src-tauri/src/application/   用例编排
 src-tauri/src/domain/        记忆模型与不变量
 src-tauri/src/infra/db/      SQLite、迁移与仓储
@@ -566,6 +565,8 @@ docs/                        设计决策与协议
 ```
 
 领域层不得依赖具体模型供应商。AI 适配器不得绕过领域层直接写数据库。
+
+Redux store 不是安全存储。允许进入 store 的内容仅限主界面需要共享的非敏感领域快照、保险箱锁定元数据和请求状态；解密后的秘密列表、主密码、秘密编辑草稿、删除确认密码及其他一次性凭证必须停留在组件局部状态，组件关闭或应用锁定时销毁。桌面 surface 运行在独立 WebView 中，不假设可与主窗口共享内存，仍通过类型化 Tauri command/event 同步。
 
 ## 19. 分阶段实施
 

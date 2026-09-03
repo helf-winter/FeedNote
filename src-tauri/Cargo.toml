@@ -1,6 +1,6 @@
 [package]
 name = "feednote"
-version = "0.2.0"
+version = "0.3.0"
 description = "A local-first evolving memory notebook"
 authors = ["FeedNote"]
 edition = "2021"

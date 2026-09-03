@@ -10,7 +10,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./api", () => ({ isTauri: true }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, message: mocks.message }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  ask: mocks.ask,
+  message: mocks.message,
+}));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: mocks.relaunch }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: mocks.check }));
 

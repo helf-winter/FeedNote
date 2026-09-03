@@ -60,7 +60,8 @@ D:\code\创业\桌面日记\data\feednote.db
 
 ## 本轮完成
 
-- Tauri 2 + Vue 3 + TypeScript 桌面应用；
+- Tauri 2 + React 18 + TypeScript 桌面应用；
+- Redux Toolkit 统一维护领域快照和异步请求状态，主密码与秘密编辑草稿不进入全局 store；
 - SQLite、WAL、FTS5 和显式数据库迁移；
 - 原始事件与结构化记忆双层模型；
 - 原始记录、记忆版本、来源、处理运行、审核项和审计日志；

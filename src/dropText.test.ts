@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { canAcceptTextDrop, droppedPlainText, type DragTextSource } from "./dropText";
+import {
+  canAcceptTextDrop,
+  droppedPlainText,
+  type DragTextSource,
+} from "./dropText";
 
-function transfer(values: Record<string, string>, types = Object.keys(values)): DragTextSource {
+function transfer(
+  values: Record<string, string>,
+  types = Object.keys(values),
+): DragTextSource {
   return {
     types,
     getData: (format) => values[format] ?? "",
@@ -17,7 +24,8 @@ describe("dragged text", () => {
 
   it("extracts visible text from HTML without script or style content", () => {
     const source = transfer({
-      "text/html": "<p>面试通知</p><style>secret</style><script>ignore()</script>",
+      "text/html":
+        "<p>面试通知</p><style>secret</style><script>ignore()</script>",
     });
     expect(droppedPlainText(source)).toBe("面试通知");
   });

@@ -18,6 +18,8 @@ export function droppedPlainText(transfer: DragTextSource | null): string {
   const html = transfer.getData("text/html");
   if (!html.trim()) return "";
   const document = new DOMParser().parseFromString(html, "text/html");
-  document.querySelectorAll("script, style, noscript").forEach((element) => element.remove());
+  document
+    .querySelectorAll("script, style, noscript")
+    .forEach((element) => element.remove());
   return (document.body.textContent ?? "").trim();
 }

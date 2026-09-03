@@ -38,7 +38,9 @@ describe("browser preview data adapter", () => {
 
   it("refuses permanent deletion without a confirmation token", async () => {
     const created = await createFeed("不能绕过确认");
-    await expect(deleteFeed(created.feedId, "invalid-token")).rejects.toThrow("确认已失效");
+    await expect(deleteFeed(created.feedId, "invalid-token")).rejects.toThrow(
+      "确认已失效",
+    );
   });
 
   it("refuses an unauthorized model endpoint", async () => {
