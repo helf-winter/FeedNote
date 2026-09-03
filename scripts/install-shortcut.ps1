@@ -18,7 +18,7 @@ $shortcut.TargetPath = $PowerShellPath
 $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LauncherPath`""
 $shortcut.WorkingDirectory = $FeedNoteRoot
 $shortcut.IconLocation = "$InstalledPath,0"
-$shortcut.Description = "启动 FeedNote 并检查本地更新"
+$shortcut.Description = "Start FeedNote and check for local updates"
 $shortcut.WindowStyle = 7
 $shortcut.Save()
 
