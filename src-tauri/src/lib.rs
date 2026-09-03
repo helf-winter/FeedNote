@@ -18,7 +18,7 @@ use db::Database;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
@@ -41,8 +41,15 @@ pub struct PendingCapture {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|arg| arg == "--check-updates") {
+                let _ = app.emit("online-update-requested", ());
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("FeedNote")
@@ -53,13 +60,7 @@ pub fn run() {
             // The prototype is portable-first so user data stays beside the executable.
             let data_dir = std::env::var_os("FEEDNOTE_DATA_DIR")
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::current_exe()
-                        .ok()
-                        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-                        .unwrap_or_else(|| std::path::PathBuf::from("."))
-                        .join("data")
-                });
+                .unwrap_or_else(default_data_dir);
             std::fs::create_dir_all(&data_dir)?;
             let database = Database::open(&data_dir.join("feednote.db"))?;
             let selection_suppressed = Arc::new(AtomicBool::new(false));
@@ -241,6 +242,30 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn default_data_dir() -> std::path::PathBuf {
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => return std::path::PathBuf::from("data"),
+    };
+    data_dir_for_executable(&executable)
+}
+
+fn data_dir_for_executable(executable: &std::path::Path) -> std::path::PathBuf {
+    let executable_dir = executable
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    if executable_dir
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(".app"))
+    {
+        return executable_dir
+            .parent()
+            .unwrap_or(executable_dir)
+            .join("data");
+    }
+    executable_dir.join("data")
+}
+
 fn tray_click_opens_main(button: MouseButton, state: MouseButtonState) -> bool {
     button == MouseButton::Left && state == MouseButtonState::Up
 }
@@ -284,5 +309,14 @@ mod tests {
             MouseButton::Left,
             MouseButtonState::Down
         ));
+    }
+
+    #[test]
+    fn d_drive_bootstrap_keeps_data_outside_the_installed_app_directory() {
+        let executable = std::path::Path::new(r"D:\FeedNote\.app\FeedNote.exe");
+        assert_eq!(
+            data_dir_for_executable(executable),
+            std::path::PathBuf::from(r"D:\FeedNote\data")
+        );
     }
 }

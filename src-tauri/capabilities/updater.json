@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "Allow only the always-running plan dock to check and install signed updates",
+  "windows": ["plan-dock"],
+  "permissions": [
+    "updater:default",
+    "process:allow-restart",
+    "dialog:allow-message"
+  ]
+}

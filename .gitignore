@@ -2,12 +2,15 @@ node_modules/
 dist/
 src-tauri/target/
 .tooling/
+.app/
 *.db
 *.db-shm
 *.db-wal
 exports/
 data/*
 !data/secrets.env.example
+*.key
+updater-signing.env
 .cleanup-quarantine/
 FeedNote.exe
 .DS_Store

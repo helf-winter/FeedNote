@@ -1,33 +1,27 @@
 $ErrorActionPreference = "Stop"
 
 $FeedNoteRoot = Split-Path -Parent $PSScriptRoot
-$InstalledPath = Join-Path $FeedNoteRoot "FeedNote.exe"
+$ManagedPath = Join-Path $FeedNoteRoot ".app\FeedNote.exe"
+$LegacyPath = Join-Path $FeedNoteRoot "FeedNote.exe"
+$InstalledPath = if (Test-Path -LiteralPath $ManagedPath -PathType Leaf) {
+    $ManagedPath
+} else {
+    $LegacyPath
+}
 $StagedPath = Join-Path $FeedNoteRoot ".tooling\release-ready\FeedNote.exe"
 $shell = New-Object -ComObject WScript.Shell
+$env:FEEDNOTE_DATA_DIR = Join-Path $FeedNoteRoot "data"
 
 function ConvertFrom-Utf8Base64([string]$Value) {
     return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Value))
 }
 
-function Test-InstalledFeedNoteRunning {
-    $installedFullPath = [IO.Path]::GetFullPath($InstalledPath)
-    $processes = @(
-        Get-CimInstance Win32_Process -Filter "Name='FeedNote.exe'" -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.ExecutablePath -and
-                [StringComparer]::OrdinalIgnoreCase.Equals(
-                    [IO.Path]::GetFullPath($_.ExecutablePath),
-                    $installedFullPath
-                )
-            }
-    )
-    return $processes.Count -gt 0
-}
-
 function Start-InstalledFeedNote {
-    if (-not (Test-InstalledFeedNoteRunning)) {
-        Start-Process -FilePath $InstalledPath -WorkingDirectory $FeedNoteRoot -WindowStyle Hidden
-    }
+    Start-Process `
+        -FilePath $InstalledPath `
+        -ArgumentList "--check-updates" `
+        -WorkingDirectory $FeedNoteRoot `
+        -WindowStyle Hidden
 }
 
 $updateAvailable = Test-Path -LiteralPath $StagedPath -PathType Leaf
@@ -51,7 +45,10 @@ if ($updateAvailable) {
     )
     if ($choice -eq 6) {
         try {
-            & (Join-Path $PSScriptRoot "deploy-release.ps1") -SourcePath $StagedPath -NoRestart
+            & (Join-Path $PSScriptRoot "deploy-release.ps1") `
+                -SourcePath $StagedPath `
+                -InstalledPath $InstalledPath `
+                -NoRestart
         } catch {
             $errorMessage =
                 (ConvertFrom-Utf8Base64 "RmVlZE5vdGUg5pu05paw5aSx6LSl77ya") +

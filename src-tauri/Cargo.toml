@@ -1,6 +1,6 @@
 [package]
 name = "feednote"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local-first evolving memory notebook"
 authors = ["FeedNote"]
 edition = "2021"
@@ -25,6 +25,9 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-single-instance = "2.4.4"
+tauri-plugin-updater = "2.11.0"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 uuid = { version = "1", features = ["v4", "serde"] }

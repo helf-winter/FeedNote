@@ -34,6 +34,7 @@ FeedNote 是一个本地持久化、可追溯的个人记忆系统。它先可�
 - “记”会把用户明确选择的文字单向追加到独立“FeedNote 备忘录”表格，失败时保留本地记录并后台重试；
 - 投递路由已停用：职位信息只保存在记忆库，明确的未来事项仍可创建桌面计划；
 - 浏览器预览模式，便于不启动桌面壳时检查界面。
+- 签名在线更新：启动时、每次点击桌面快捷方式以及后台每 6 小时检查 GitHub Release；发现新版本后由用户确认，再验签、安装并重启。
 
 完整边界和架构见 [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md)。
 
@@ -89,7 +90,17 @@ data/secrets.env     本机密钥，不进入数据库或导出
 .\scripts\install-shortcut.ps1
 ```
 
-此后点击桌面 FeedNote 快捷方式时，启动器会比较当前版本和待更新版本；发现更新才询问是否安装。确认后会退出旧版、备份为 `.tooling\release-ready\FeedNote.previous.exe`、替换根目录 `FeedNote.exe` 并重新启动；拒绝则继续使用旧版。
+此后点击桌面 FeedNote 快捷方式时，启动器先检查开发构建产生的本地待更新版本，再通知已运行的 FeedNote 检查 GitHub 在线版本。发现在线更新后会显示版本号并询问是否安装；确认后只有通过内置公钥验签的安装包才会执行。应用还会在启动时和后台每 6 小时检查一次，网络不可用时保持静默，不影响现有功能。
+
+正式版本通过 GitHub Release 发布，流程和不可逾越的签名边界见 [docs/RELEASING.md](docs/RELEASING.md)。`data\updater.key` 与 `data\updater-signing.env` 是发布私钥，均被 Git 忽略；丢失私钥将无法向已安装版本发布可信更新，泄露私钥则必须通过已有可信版本轮换公钥。
+
+从旧便携版首次启用在线更新时，先运行一次：
+
+```powershell
+.\scripts\bootstrap-online-updates.ps1
+```
+
+脚本会静默安装到项目目录内的 `.app`，重建桌面快捷方式并继续使用项目根目录的 `data`，不会把应用或数据迁到 C 盘。完成这一次引导后，后续正式版本均由应用内在线更新器处理。
 
 ## 模型配置
 

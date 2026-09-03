@@ -1,5 +1,6 @@
 param(
     [string]$SourcePath,
+    [string]$InstalledPath,
     [switch]$NoRestart
 )
 
@@ -7,7 +8,15 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "env.ps1")
 $FeedNoteRoot = Split-Path -Parent $PSScriptRoot
-$InstalledPath = Join-Path $FeedNoteRoot "FeedNote.exe"
+if ([string]::IsNullOrWhiteSpace($InstalledPath)) {
+    $managedPath = Join-Path $FeedNoteRoot ".app\FeedNote.exe"
+    $InstalledPath = if (Test-Path -LiteralPath $managedPath -PathType Leaf) {
+        $managedPath
+    } else {
+        Join-Path $FeedNoteRoot "FeedNote.exe"
+    }
+}
+$InstalledPath = [IO.Path]::GetFullPath($InstalledPath)
 $ReleaseDirectory = Join-Path $FeedNoteRoot ".tooling\release-ready"
 $StagedPath = Join-Path $ReleaseDirectory "FeedNote.exe"
 $BackupPath = Join-Path $ReleaseDirectory "FeedNote.previous.exe"
@@ -22,6 +31,7 @@ if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
 }
 
 New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $InstalledPath) | Out-Null
 if (-not [StringComparer]::OrdinalIgnoreCase.Equals($SourcePath, $StagedPath)) {
     Copy-Item -LiteralPath $SourcePath -Destination $StagedPath -Force
 }
@@ -69,6 +79,7 @@ try {
     throw
 } finally {
     if (-not $NoRestart -and (Test-Path -LiteralPath $InstalledPath -PathType Leaf)) {
+        $env:FEEDNOTE_DATA_DIR = Join-Path $FeedNoteRoot "data"
         Start-Process -FilePath $InstalledPath -WorkingDirectory $FeedNoteRoot -WindowStyle Hidden
     }
 }

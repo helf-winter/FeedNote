@@ -26,6 +26,7 @@ import {
   togglePlanDock,
   type PlanItem,
 } from "../api";
+import { checkForOnlineUpdate } from "../updater";
 
 const DOCK_OPACITY_KEY = "feednote.plan-dock.opacity";
 const DOCK_WIDTH_KEY = "feednote.plan-dock.width";
@@ -52,6 +53,8 @@ const visiblePlans = computed(() =>
 );
 let unlisten: UnlistenFn | undefined;
 let unlistenResize: UnlistenFn | undefined;
+let unlistenUpdate: UnlistenFn | undefined;
+let updateTimer: number | undefined;
 let collapsedPointer: { id: number; x: number; y: number } | undefined;
 let dragDepth = 0;
 let dropMessageTimer: number | undefined;
@@ -86,17 +89,22 @@ function saveDockHeight(height: number): void {
 onMounted(async () => {
   await refresh();
   unlisten = await listen("plans-changed", refresh);
+  unlistenUpdate = await listen("online-update-requested", checkForOnlineUpdate);
   unlistenResize = await getCurrentWindow().onResized(({ payload }) => {
     if (expanded.value) {
       saveDockWidth(payload.width);
       saveDockHeight(payload.height);
     }
   });
+  void checkForOnlineUpdate();
+  updateTimer = window.setInterval(() => void checkForOnlineUpdate(), 6 * 60 * 60 * 1000);
 });
 
 onBeforeUnmount(() => {
   unlisten?.();
   unlistenResize?.();
+  unlistenUpdate?.();
+  if (updateTimer) window.clearInterval(updateTimer);
   if (dropMessageTimer) window.clearTimeout(dropMessageTimer);
 });
 

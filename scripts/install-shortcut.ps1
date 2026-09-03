@@ -2,7 +2,12 @@ $ErrorActionPreference = "Stop"
 
 $FeedNoteRoot = Split-Path -Parent $PSScriptRoot
 $LauncherPath = Join-Path $PSScriptRoot "launch-feednote.ps1"
-$InstalledPath = Join-Path $FeedNoteRoot "FeedNote.exe"
+$ManagedPath = Join-Path $FeedNoteRoot ".app\FeedNote.exe"
+$InstalledPath = if (Test-Path -LiteralPath $ManagedPath -PathType Leaf) {
+    $ManagedPath
+} else {
+    Join-Path $FeedNoteRoot "FeedNote.exe"
+}
 $DesktopPath = [Environment]::GetFolderPath("Desktop")
 $ExistingPath = Join-Path $DesktopPath "FeedNote.exe.lnk"
 $ShortcutPath = if (Test-Path -LiteralPath $ExistingPath) {
@@ -18,7 +23,7 @@ $shortcut.TargetPath = $PowerShellPath
 $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LauncherPath`""
 $shortcut.WorkingDirectory = $FeedNoteRoot
 $shortcut.IconLocation = "$InstalledPath,0"
-$shortcut.Description = "Start FeedNote and check for local updates"
+$shortcut.Description = "Start FeedNote and check for signed updates"
 $shortcut.WindowStyle = 7
 $shortcut.Save()
 
