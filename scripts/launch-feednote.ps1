@@ -26,9 +26,9 @@ function Start-InstalledFeedNote {
 
 $updateAvailable = Test-Path -LiteralPath $StagedPath -PathType Leaf
 if ($updateAvailable -and (Test-Path -LiteralPath $InstalledPath -PathType Leaf)) {
-    $installedHash = (Get-FileHash -LiteralPath $InstalledPath -Algorithm SHA256).Hash
-    $stagedHash = (Get-FileHash -LiteralPath $StagedPath -Algorithm SHA256).Hash
-    $updateAvailable = $installedHash -ne $stagedHash
+    $installedVersion = [Version](Get-Item -LiteralPath $InstalledPath).VersionInfo.FileVersion
+    $stagedVersion = [Version](Get-Item -LiteralPath $StagedPath).VersionInfo.FileVersion
+    $updateAvailable = $stagedVersion -gt $installedVersion
 }
 
 if ($updateAvailable) {
