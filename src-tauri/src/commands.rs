@@ -16,9 +16,10 @@ use crate::{
     models::{
         AppSettings, CaptureCommitResult, CreateFeedInput, CreateFeedResult, DeleteConfirmation,
         FeedEvent, FeishuMemoStatus, FeishuSecretStatus, FeishuSourceStatus, FeishuSyncStatus,
-        MemoCaptureResult, MemoItem, MemoryDetail, MemorySummary, PlanItem, PlanProposal,
-        ProcessResult, ReviewItem, SecretItem, SecretStashResult, Stats, UpdatePlanInput,
-        UpdateSecretInput, UpdateSettingsInput, VaultStatus,
+        MemoCaptureResult, MemoItem, MemoRecallResult, MemoRecallSurfaceState, MemoryDetail,
+        MemorySummary, PlanItem, PlanProposal, ProcessResult, ReviewItem, SecretItem,
+        SecretStashResult, Stats, UpdatePlanInput, UpdateSecretInput, UpdateSettingsInput,
+        VaultStatus,
     },
     windows_selection::{self, SelectionSnapshot},
     AppState, PendingCapture,
@@ -443,11 +444,150 @@ pub fn record_memo_capture(
         .expect("pending capture lock poisoned") = None;
     let _ = app.emit("memos-changed", &memo);
     schedule_memo_sync(&app, &state, memo.id.clone());
+    schedule_automatic_memo_recall(
+        &app,
+        &state,
+        recall_context(&snapshot),
+        Some(memo.id.clone()),
+    );
 
     Ok(MemoCaptureResult {
         memo_id: memo.id,
         message: "已记入备忘录，正在同步飞书".to_string(),
     })
+}
+
+#[tauri::command]
+pub fn get_memo_recall_state(state: State<'_, AppState>) -> MemoRecallSurfaceState {
+    state
+        .memo_recall_surface
+        .lock()
+        .expect("memo recall surface lock poisoned")
+        .clone()
+}
+
+#[tauri::command]
+pub fn recall_memos(
+    query: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<MemoRecallResult> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(crate::error::AppError::Validation(
+            "请输入要召回的主题".to_string(),
+        ));
+    }
+    if query.chars().count() > 4_000 {
+        return Err(crate::error::AppError::Validation(
+            "召回上下文不能超过 4000 个字符".to_string(),
+        ));
+    }
+    let result = state.database.recall_memos(query, None)?;
+    present_memo_recall(&app, &state, MemoRecallSurfaceState::result(result.clone()));
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn dismiss_memo_recall(app: AppHandle, state: State<'_, AppState>) {
+    if let Some(window) = app.get_webview_window("memo-recall") {
+        let _ = window.hide();
+    }
+    state.selection_suppressed.store(false, Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub fn mark_memo_recall_irrelevant(
+    memo_id: String,
+    matched_terms: Vec<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .database
+        .mark_memo_recall_irrelevant(&memo_id, &matched_terms)?;
+    if let Some(window) = app.get_webview_window("memo-recall") {
+        let _ = window.hide();
+    }
+    state.selection_suppressed.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_memo_recall_target(app: AppHandle, state: State<'_, AppState>) {
+    if let Some(window) = app.get_webview_window("memo-recall") {
+        let _ = window.hide();
+    }
+    state.selection_suppressed.store(false, Ordering::Relaxed);
+    crate::show_main_window(&app);
+    let _ = app.emit_to("main", "open-memo-page", ());
+}
+
+pub(crate) fn trigger_manual_memo_recall(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.selection_suppressed.store(true, Ordering::Relaxed);
+    let selection = windows_selection::read_current_selection();
+    state.selection_suppressed.store(false, Ordering::Relaxed);
+    match selection {
+        Ok(snapshot) if !snapshot.selected_text.trim().is_empty() => {
+            match state
+                .database
+                .recall_memos(&recall_context(&snapshot), None)
+            {
+                Ok(result) => {
+                    present_memo_recall(app, &state, MemoRecallSurfaceState::result(result))
+                }
+                Err(_) => present_memo_recall(app, &state, MemoRecallSurfaceState::input()),
+            }
+        }
+        _ => present_memo_recall(app, &state, MemoRecallSurfaceState::input()),
+    }
+}
+
+fn recall_context(snapshot: &SelectionSnapshot) -> String {
+    format!("{}\n{}", snapshot.selected_text, snapshot.surrounding_text)
+}
+
+fn schedule_automatic_memo_recall(
+    app: &AppHandle,
+    state: &AppState,
+    context: String,
+    exclude_memo_id: Option<String>,
+) {
+    let Ok(result) = state
+        .database
+        .recall_memos(&context, exclude_memo_id.as_deref())
+    else {
+        return;
+    };
+    if result.matches.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        while app
+            .get_webview_window("capture-menu")
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        let state = app.state::<AppState>();
+        present_memo_recall(&app, &state, MemoRecallSurfaceState::result(result));
+    });
+}
+
+fn present_memo_recall(app: &AppHandle, state: &AppState, surface_state: MemoRecallSurfaceState) {
+    *state
+        .memo_recall_surface
+        .lock()
+        .expect("memo recall surface lock poisoned") = surface_state.clone();
+    if let Some(dot) = app.get_webview_window("capture-dot") {
+        let _ = dot.hide();
+    }
+    show_memo_recall_window(app);
+    let _ = app.emit_to("memo-recall", "memo-recall-changed", surface_state);
 }
 
 fn schedule_memo_sync(app: &AppHandle, state: &AppState, memo_id: String) {
@@ -725,6 +865,7 @@ pub async fn commit_capture(
     }
     .to_string();
     let needs_clarification = plan.is_some() && scheduled_at.is_none();
+    schedule_automatic_memo_recall(&app, &state, recall_context(&snapshot), None);
     Ok(CaptureCommitResult {
         destination: destination.to_string(),
         message,
@@ -944,6 +1085,28 @@ fn show_drag_capture_menu(app: &AppHandle) {
     let _ = menu.set_position(PhysicalPosition::new(x, y));
     let _ = menu.show();
     let _ = menu.set_focus();
+}
+
+fn show_memo_recall_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("memo-recall") else {
+        return;
+    };
+    let monitor = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.current_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
+        let area = monitor.work_area();
+        let x = area.position.x + area.size.width as i32 - 388;
+        let y = area.position.y + area.size.height as i32 - 318;
+        let _ = window.set_position(PhysicalPosition::new(
+            x.max(area.position.x + 8),
+            y.max(area.position.y + 8),
+        ));
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
 }
 
 fn close_capture_menu(app: &AppHandle, state: &AppState) {

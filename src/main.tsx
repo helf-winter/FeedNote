@@ -5,6 +5,7 @@ import App from "./App";
 import CaptureDot from "./surfaces/CaptureDot";
 import CaptureMenu from "./surfaces/CaptureMenu";
 import PlanDock from "./surfaces/PlanDock";
+import MemoRecallSurface from "./surfaces/MemoRecallSurface";
 import { store } from "./store/store";
 import "./capture-dot.css";
 import "./overlay.css";
@@ -18,7 +19,9 @@ const Component =
       ? CaptureMenu
       : surface === "plan-dock"
         ? PlanDock
-        : App;
+        : surface === "memo-recall"
+          ? MemoRecallSurface
+          : App;
 
 if (!surface) void import("./styles.css");
 

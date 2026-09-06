@@ -352,6 +352,9 @@ export default function App() {
       void listen("memos-changed", () => {
         if (activePageRef.current === "memo") void dispatch(loadMemos());
       }).then((stop) => (disposed ? stop() : stops.push(stop)));
+      void listen("open-memo-page", () => navigate("memo")).then((stop) =>
+        disposed ? stop() : stops.push(stop),
+      );
       void listen("plans-changed", () => void dispatch(loadPlans(true))).then(
         (stop) => (disposed ? stop() : stops.push(stop)),
       );
@@ -498,7 +501,7 @@ export default function App() {
     if (feishuSync.state === "syncing") return;
     setFeishuSync({
       state: "syncing",
-      message: "正在同步飞书计划表和待办提醒...",
+      message: "正在同步飞书云计划和待办提醒...",
     });
     try {
       await updateSettings(settings);
@@ -2483,8 +2486,8 @@ function SettingsPage({
         )}
       </SettingSection>
       <SettingSection
-        title="飞书计划表"
-        description="维护真正的待办，并双向同步已有计划的完成状态。"
+        title="飞书云计划"
+        description="以多维表格为计划主库，跨端同步计划内容和状态。"
         toggle={
           <Toggle
             checked={settings.feishuSyncEnabled}
@@ -2529,7 +2532,7 @@ function SettingsPage({
               onClick={() => void onOpen(feishu.spreadsheetUrl)}
             >
               <Table2 size={16} />
-              打开表格
+              打开多维表格
               <ExternalLink size={14} />
             </button>
           )}

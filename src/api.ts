@@ -137,6 +137,23 @@ export interface MemoCaptureResult {
   message: string;
 }
 
+export interface MemoRecallMatch {
+  memo: MemoItem;
+  score: number;
+  matchedEntities: string[];
+  matchedTerms: string[];
+}
+
+export interface MemoRecallResult {
+  matches: MemoRecallMatch[];
+  total: number;
+}
+
+export interface MemoRecallSurfaceState {
+  mode: "input" | "result";
+  result?: MemoRecallResult;
+}
+
 export interface FeishuMemoStatus {
   configured: boolean;
   spreadsheetUrl?: string;
@@ -615,6 +632,29 @@ export async function getCapturePreview(): Promise<SelectionSnapshot | null> {
 
 export async function recordMemoCapture(): Promise<MemoCaptureResult> {
   return invoke("record_memo_capture");
+}
+
+export async function getMemoRecallState(): Promise<MemoRecallSurfaceState> {
+  return invoke("get_memo_recall_state");
+}
+
+export async function recallMemos(query: string): Promise<MemoRecallResult> {
+  return invoke("recall_memos", { query });
+}
+
+export async function dismissMemoRecall(): Promise<void> {
+  return invoke("dismiss_memo_recall");
+}
+
+export async function markMemoRecallIrrelevant(
+  memoId: string,
+  matchedTerms: string[],
+): Promise<void> {
+  return invoke("mark_memo_recall_irrelevant", { memoId, matchedTerms });
+}
+
+export async function openMemoRecallTarget(): Promise<void> {
+  return invoke("open_memo_recall_target");
 }
 
 export async function listMemos(limit = 500): Promise<MemoItem[]> {

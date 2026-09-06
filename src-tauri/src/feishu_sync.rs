@@ -17,8 +17,8 @@ use crate::{
     db::Database,
     error::{AppError, AppResult},
     models::{
-        FeishuMemoStatus, FeishuPlanTaskMapping, FeishuSecretStatus, FeishuSheetState,
-        FeishuSourceStatus, FeishuSyncStatus, MemoItem, PlanItem, SecretItem,
+        CloudPlanSnapshot, FeishuMemoStatus, FeishuPlanTaskMapping, FeishuSecretStatus,
+        FeishuSheetState, FeishuSourceStatus, FeishuSyncStatus, MemoItem, PlanItem, SecretItem,
     },
     secrets::parse_env,
     vault::Vault,
@@ -71,6 +71,9 @@ struct FeishuSecrets {
     app_secret: String,
     task_assignee_id: Option<String>,
     task_assignee_id_type: Option<String>,
+    base_token: Option<String>,
+    base_table_id: Option<String>,
+    web_owner_open_id: Option<String>,
 }
 
 impl FeishuSecrets {
@@ -98,11 +101,19 @@ impl FeishuSecrets {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let base_token = optional_secret(&values, "FEISHU_BASE_APP_TOKEN");
+        let base_table_id = optional_secret(&values, "FEISHU_BASE_TABLE_ID");
+        let web_owner_open_id = optional_secret(&values, "FEISHU_WEB_ALLOWED_OPEN_IDS")
+            .and_then(|value| value.split(',').next().map(str::trim).map(str::to_string))
+            .filter(|value| !value.is_empty());
         Ok(Self {
             app_id,
             app_secret,
             task_assignee_id,
             task_assignee_id_type,
+            base_token,
+            base_table_id,
+            web_owner_open_id,
         })
     }
 
@@ -197,10 +208,14 @@ pub fn start_scheduler(
 pub fn status(database: &Database, secrets_path: &Path) -> AppResult<FeishuSyncStatus> {
     let settings = database.get_settings()?;
     let state = database.get_feishu_sheet_state()?;
+    let base_url = FeishuSecrets::load(secrets_path)
+        .ok()
+        .and_then(|secrets| secrets.base_token)
+        .map(|token| format!("https://feishu.cn/base/{token}"));
     Ok(FeishuSyncStatus {
         enabled: settings.feishu_sync_enabled,
         configured: FeishuSecrets::is_configured(secrets_path),
-        spreadsheet_url: state.map(|state| state.spreadsheet_url),
+        spreadsheet_url: base_url.or_else(|| state.map(|state| state.spreadsheet_url)),
         pending_plans: database.count_pending_feishu_plans()?,
         last_error: database.get_feishu_sync_error()?,
         task_reminders_enabled: settings.feishu_task_reminders_enabled,
@@ -322,9 +337,9 @@ pub async fn sync_now(
         0
     };
     Ok(if synced == 0 && task_synced == 0 {
-        "飞书计划表和待办提醒均已同步".to_string()
+        "飞书云计划和待办提醒均已同步".to_string()
     } else if task_synced == 0 {
-        format!("已同步 {synced} 条计划到飞书表格")
+        format!("已同步 {synced} 条计划到飞书多维表格")
     } else if synced == 0 {
         format!("已同步 {task_synced} 条飞书待办提醒")
     } else {
@@ -921,13 +936,16 @@ async fn sync_pending(
     secrets_path: &Path,
     app: &AppHandle,
 ) -> AppResult<usize> {
+    let secrets = FeishuSecrets::load(secrets_path)?;
+    if secrets.base_token.is_some() && secrets.base_table_id.is_some() {
+        return sync_base_pending(database, &secrets, app).await;
+    }
     let initial_pending = database.list_pending_feishu_plans(200)?;
     let existing_state = database.get_feishu_sheet_state()?;
     if initial_pending.is_empty() && existing_state.is_none() {
         return Ok(0);
     }
 
-    let secrets = FeishuSecrets::load(secrets_path)?;
     let client = client()?;
     let token = tenant_access_token(&client, &secrets).await?;
     let state = match existing_state {
@@ -969,6 +987,244 @@ async fn sync_pending(
         database.mark_plan_feishu_synced(&plan.id, synced_at)?;
     }
     Ok(pulled + pending.len())
+}
+
+#[derive(Debug, Clone)]
+struct BasePlanRecord {
+    record_id: String,
+    updated_at: i64,
+    fields: Value,
+}
+
+async fn sync_base_pending(
+    database: &Database,
+    secrets: &FeishuSecrets,
+    app: &AppHandle,
+) -> AppResult<usize> {
+    let base_token = secrets
+        .base_token
+        .as_deref()
+        .ok_or_else(|| AppError::FeishuUnavailable("未配置飞书多维表格 token".to_string()))?;
+    let table_id = secrets
+        .base_table_id
+        .as_deref()
+        .ok_or_else(|| AppError::FeishuUnavailable("未配置飞书多维表格 table id".to_string()))?;
+    let client = client()?;
+    let token = tenant_access_token(&client, secrets).await?;
+    let owner_id = secrets
+        .web_owner_open_id
+        .as_deref()
+        .or(secrets.task_assignee_id.as_deref())
+        .unwrap_or_default();
+
+    let remote_records = read_base_plan_records(&client, &token, base_token, table_id).await?;
+    let mut changed = 0;
+    for record in &remote_records {
+        let Some(snapshot) = base_record_snapshot(record) else {
+            continue;
+        };
+        if let Some(updated) = database.apply_cloud_plan(&snapshot)? {
+            let _ = app.emit("plans-changed", &updated);
+            changed += 1;
+        }
+    }
+
+    let remote_by_id: HashMap<String, BasePlanRecord> = remote_records
+        .into_iter()
+        .filter_map(|record| {
+            let id = cell_text(&record.fields["计划ID"]);
+            (!id.is_empty()).then_some((id, record))
+        })
+        .collect();
+    let pending = database.list_pending_feishu_plans(500)?;
+    for plan in &pending {
+        upsert_base_plan(
+            &client,
+            &token,
+            base_token,
+            table_id,
+            remote_by_id
+                .get(&plan.id)
+                .map(|record| record.record_id.as_str()),
+            plan,
+            owner_id,
+        )
+        .await?;
+        database.mark_plan_feishu_synced(&plan.id, Utc::now().timestamp_millis())?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+async fn read_base_plan_records(
+    client: &Client,
+    token: &str,
+    base_token: &str,
+    table_id: &str,
+) -> AppResult<Vec<BasePlanRecord>> {
+    let mut records = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut url = Url::parse(&format!(
+            "{API_BASE}/bitable/v1/apps/{base_token}/tables/{table_id}/records"
+        ))
+        .map_err(|_| AppError::FeishuUnavailable("飞书多维表格读取地址无效".to_string()))?;
+        url.query_pairs_mut().append_pair("page_size", "100");
+        if let Some(page_token) = page_token.as_deref() {
+            url.query_pairs_mut().append_pair("page_token", page_token);
+        }
+        let response = client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let payload = checked_json(response).await?;
+        let data = &payload["data"];
+        for item in data["items"].as_array().cloned().unwrap_or_default() {
+            let record_id = string_field(&item, "record_id")?;
+            let updated_at = timestamp_value(&item["last_modified_time"])
+                .or_else(|| timestamp_value(&item["fields"]["更新时间"]))
+                .unwrap_or_default();
+            records.push(BasePlanRecord {
+                record_id,
+                updated_at,
+                fields: item["fields"].clone(),
+            });
+        }
+        if data["has_more"].as_bool() != Some(true) {
+            break;
+        }
+        page_token = data["page_token"].as_str().map(str::to_string);
+        if page_token.is_none() {
+            break;
+        }
+    }
+    Ok(records)
+}
+
+fn base_record_snapshot(record: &BasePlanRecord) -> Option<CloudPlanSnapshot> {
+    let fields = &record.fields;
+    let id = cell_text(&fields["计划ID"]);
+    if id.is_empty() {
+        return None;
+    }
+    let status = match cell_text(&fields["状态"]).as_str() {
+        "已完成" => "done",
+        "待安排" | "待补充时间" => "needs_clarification",
+        _ => "scheduled",
+    };
+    let tag = fields["标签"]
+        .as_array()
+        .and_then(|items| items.first())
+        .map(cell_text)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let value = cell_text(&fields["标签"]);
+            (!value.is_empty()).then_some(value)
+        });
+    let details = cell_text(&fields["详情"]);
+    let content = cell_text(&fields["内容"]);
+    Some(CloudPlanSnapshot {
+        id,
+        title: cell_text(&fields["标题"]),
+        details: if details.trim().is_empty() {
+            "云端创建的计划".to_string()
+        } else {
+            details.clone()
+        },
+        content: if content.trim().is_empty() {
+            details.chars().take(60).collect()
+        } else {
+            content
+        },
+        link_url: non_empty_cell(&fields["链接"]),
+        notes: non_empty_cell(&fields["注意事项"]),
+        scheduled_at: timestamp_value(&fields["时间"]),
+        status: status.to_string(),
+        source_title: cell_text(&fields["来源"]),
+        updated_at: record.updated_at.max(
+            fields["版本"]
+                .as_i64()
+                .or_else(|| cell_text(&fields["版本"]).parse().ok())
+                .unwrap_or_default(),
+        ),
+        reminder_minutes_before: fields["提醒提前分钟"]
+            .as_u64()
+            .or_else(|| cell_text(&fields["提醒提前分钟"]).parse().ok())
+            .unwrap_or(180)
+            .clamp(0, 10_080) as u32,
+        tag,
+        deleted: fields["已删除"].as_bool().unwrap_or(false),
+    })
+}
+
+fn non_empty_cell(value: &Value) -> Option<String> {
+    let value = cell_text(value);
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn timestamp_value(value: &Value) -> Option<i64> {
+    let value = value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))?;
+    let millis = if value < 100_000_000_000 {
+        value.checked_mul(1_000)?
+    } else {
+        value
+    };
+    (946_684_800_000..=4_102_444_800_000)
+        .contains(&millis)
+        .then_some(millis)
+}
+
+async fn upsert_base_plan(
+    client: &Client,
+    token: &str,
+    base_token: &str,
+    table_id: &str,
+    record_id: Option<&str>,
+    plan: &PlanItem,
+    owner_id: &str,
+) -> AppResult<()> {
+    let base_url = format!("{API_BASE}/bitable/v1/apps/{base_token}/tables/{table_id}/records");
+    let (method, url) = if let Some(record_id) = record_id {
+        (reqwest::Method::PUT, format!("{base_url}/{record_id}"))
+    } else {
+        (reqwest::Method::POST, base_url)
+    };
+    let response = client
+        .request(method, url)
+        .bearer_auth(token)
+        .json(&json!({ "fields": base_plan_fields(plan, owner_id) }))
+        .send()
+        .await
+        .map_err(network_error)?;
+    checked_json(response).await.map(|_| ())
+}
+
+fn base_plan_fields(plan: &PlanItem, owner_id: &str) -> Value {
+    json!({
+        "标题": plan.title,
+        "状态": match plan.status.as_str() {
+            "done" => "已完成",
+            "needs_clarification" => "待安排",
+            _ => "已安排",
+        },
+        "时间": plan.scheduled_at,
+        "内容": plan.content,
+        "详情": plan.details,
+        "链接": plan.link_url,
+        "注意事项": plan.notes,
+        "标签": plan.tag.as_ref().map(|tag| vec![tag]).unwrap_or_default(),
+        "来源": plan.source_title,
+        "提醒提前分钟": plan.reminder_minutes_before,
+        "计划ID": plan.id,
+        "版本": plan.updated_at,
+        "更新来源": "desktop",
+        "所有者ID": owner_id,
+        "已删除": false,
+    })
 }
 
 async fn sync_memo_pending(database: &Database, secrets_path: &Path) -> AppResult<usize> {
@@ -1719,6 +1975,15 @@ fn required_secret(values: &HashMap<String, String>, key: &str) -> AppResult<Str
         .ok_or_else(|| AppError::FeishuUnavailable(format!("data\\secrets.env 中缺少 {key}")))
 }
 
+fn optional_secret(values: &HashMap<String, String>, key: &str) -> Option<String> {
+    values
+        .get(key)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn client() -> AppResult<Client> {
     if let Some(client) = FEISHU_CLIENT.get() {
         return Ok(client.clone());
@@ -1830,6 +2095,62 @@ mod tests {
         assert_eq!(remote_done_from_status(&json!("已完成")), Some(true));
         assert_eq!(remote_done_from_status(&json!("todo")), Some(false));
         assert_eq!(remote_done_from_status(&json!("随便写的状态")), None);
+    }
+
+    #[test]
+    fn maps_base_records_without_leaking_unlisted_fields() {
+        let record = BasePlanRecord {
+            record_id: "rec-1".to_string(),
+            updated_at: 1_788_409_142_581,
+            fields: json!({
+                "计划ID": [{ "text": "plan-1" }],
+                "标题": [{ "text": "完成前端面试" }],
+                "状态": "已安排",
+                "时间": 1_788_854_400_000_i64,
+                "详情": "准备面试",
+                "内容": "前端面试",
+                "标签": ["面试"],
+                "提醒提前分钟": 180,
+                "版本": 3,
+                "已删除": false,
+                "不应读取": "private",
+            }),
+        };
+        let snapshot = base_record_snapshot(&record).unwrap();
+        assert_eq!(snapshot.id, "plan-1");
+        assert_eq!(snapshot.title, "完成前端面试");
+        assert_eq!(snapshot.status, "scheduled");
+        assert_eq!(snapshot.tag.as_deref(), Some("面试"));
+        assert_eq!(snapshot.updated_at, record.updated_at);
+    }
+
+    #[test]
+    fn base_fields_use_the_cross_device_contract() {
+        let plan = PlanItem {
+            id: "plan-1".to_string(),
+            feed_event_id: "feed-1".to_string(),
+            title: "完成面试".to_string(),
+            details: "准备好项目介绍".to_string(),
+            content: "前端面试".to_string(),
+            link_url: Some("https://example.com".to_string()),
+            notes: None,
+            scheduled_at: Some(1_788_854_400_000),
+            status: "scheduled".to_string(),
+            clarification_question: None,
+            source_title: "测试".to_string(),
+            created_at: 1,
+            updated_at: 2,
+            reminded_at: None,
+            feishu_synced_at: None,
+            reminder_minutes_before: 180,
+            tag: Some("面试".to_string()),
+        };
+        let fields = base_plan_fields(&plan, "ou_owner");
+        assert_eq!(fields["计划ID"], "plan-1");
+        assert_eq!(fields["所有者ID"], "ou_owner");
+        assert_eq!(fields["状态"], "已安排");
+        assert_eq!(fields["标签"], json!(["面试"]));
+        assert!(fields.get("原始投喂").is_none());
     }
 
     #[test]

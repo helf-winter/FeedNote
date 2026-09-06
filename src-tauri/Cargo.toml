@@ -1,6 +1,6 @@
 [package]
 name = "feednote"
-version = "0.3.0"
+version = "0.5.0"
 description = "A local-first evolving memory notebook"
 authors = ["FeedNote"]
 edition = "2021"
@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 aes-gcm = "0.10"
 argon2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
+jieba-rs = "0.7"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }

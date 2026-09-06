@@ -1,5 +1,7 @@
 node_modules/
 dist/
+dist-web/
+data/web-sessions.json
 src-tauri/target/
 .tooling/
 .app/

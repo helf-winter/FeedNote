@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Mutex};
+use std::{collections::BTreeSet, path::Path, sync::Mutex};
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -8,10 +8,11 @@ use uuid::Uuid;
 use crate::{
     error::{AppError, AppResult},
     models::{
-        AiProposal, AppSettings, CreateFeedInput, CreateFeedResult, EncryptedSecretRecord,
-        FeedEvent, FeishuPlanTaskMapping, FeishuSheetState, MemoItem, MemoryDetail, MemorySummary,
-        MemoryVersion, PlanItem, PlanProposal, ReviewItem, Stats, UpdatePlanInput, VaultMeta,
-        DEFAULT_LLM_ENDPOINT, DEFAULT_LLM_MODEL,
+        AiProposal, AppSettings, CloudPlanSnapshot, CreateFeedInput, CreateFeedResult,
+        EncryptedSecretRecord, FeedEvent, FeishuPlanTaskMapping, FeishuSheetState, MemoItem,
+        MemoRecallMatch, MemoRecallResult, MemoryDetail, MemorySummary, MemoryVersion, PlanItem,
+        PlanProposal, ReviewItem, Stats, UpdatePlanInput, VaultMeta, DEFAULT_LLM_ENDPOINT,
+        DEFAULT_LLM_MODEL,
     },
 };
 
@@ -47,7 +48,7 @@ impl Database {
     }
 
     fn migrate(&self) -> AppResult<()> {
-        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut connection = self.connection.lock().expect("database lock poisoned");
         connection.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS feed_events (
@@ -204,6 +205,29 @@ impl Database {
                 feishu_synced_at INTEGER
             );
 
+            CREATE TABLE IF NOT EXISTS memo_recall_index (
+                memo_id TEXT PRIMARY KEY REFERENCES memo_records(id) ON DELETE CASCADE,
+                tokens_json TEXT NOT NULL,
+                entities_json TEXT NOT NULL,
+                phrases_json TEXT NOT NULL,
+                search_text TEXT NOT NULL,
+                index_version INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS memo_recall_fts USING fts5(
+                memo_id UNINDEXED,
+                search_text,
+                tokenize = 'unicode61'
+            );
+
+            CREATE TABLE IF NOT EXISTS memo_recall_feedback (
+                memo_id TEXT NOT NULL REFERENCES memo_records(id) ON DELETE CASCADE,
+                term TEXT NOT NULL,
+                penalty REAL NOT NULL DEFAULT 1,
+                PRIMARY KEY (memo_id, term)
+            );
+
             CREATE TABLE IF NOT EXISTS feishu_secret_cleanup_queue (
                 secret_id TEXT PRIMARY KEY
             );
@@ -232,6 +256,8 @@ impl Database {
             "#,
         )?;
         ensure_plan_columns(&connection)?;
+        ensure_memo_recall_columns(&connection)?;
+        rebuild_memo_recall_index(&mut connection)?;
         Ok(())
     }
 
@@ -775,6 +801,116 @@ impl Database {
         )?;
         transaction.commit()?;
         Ok(Some(updated))
+    }
+
+    pub fn apply_cloud_plan(&self, snapshot: &CloudPlanSnapshot) -> AppResult<Option<PlanItem>> {
+        if snapshot.deleted {
+            return Ok(None);
+        }
+        validate_plan_edit(
+            snapshot.title.trim(),
+            snapshot.details.trim(),
+            snapshot.content.trim(),
+            snapshot.link_url.as_deref(),
+            snapshot.notes.as_deref(),
+            snapshot.scheduled_at,
+            snapshot.reminder_minutes_before,
+            snapshot.tag.as_deref(),
+        )?;
+        if !matches!(
+            snapshot.status.as_str(),
+            "scheduled" | "needs_clarification" | "done"
+        ) {
+            return Err(AppError::Validation("云计划状态无效".to_string()));
+        }
+
+        let mut connection = self.connection.lock().expect("database lock poisoned");
+        let transaction = connection.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT updated_at, feishu_synced_at FROM plans WHERE id = ?1",
+                [&snapshot.id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+        if let Some((local_updated_at, synced_at)) = current {
+            let local_is_dirty = !synced_at.is_some_and(|value| value >= local_updated_at);
+            if local_is_dirty && local_updated_at > snapshot.updated_at {
+                return Ok(None);
+            }
+            if synced_at.is_some_and(|value| value >= snapshot.updated_at) {
+                return Ok(None);
+            }
+            let clarification = (snapshot.status == "needs_clarification")
+                .then_some("请补充计划的具体日期和时间。");
+            let updated_at = snapshot.updated_at.max(local_updated_at.saturating_add(1));
+            transaction.execute(
+                "UPDATE plans
+                 SET title = ?2, details = ?3, content = ?4, link_url = ?5, notes = ?6,
+                     scheduled_at = ?7, status = ?8, clarification_question = ?9,
+                     source_title = ?10, updated_at = ?11, feishu_synced_at = ?11,
+                     reminder_minutes_before = ?12, tag = ?13,
+                     reminded_at = CASE WHEN scheduled_at IS ?7 AND status = ?8 THEN reminded_at ELSE NULL END
+                 WHERE id = ?1",
+                params![
+                    snapshot.id,
+                    snapshot.title.trim(),
+                    snapshot.details.trim(),
+                    snapshot.content.trim(),
+                    optional_trimmed(snapshot.link_url.as_deref()),
+                    optional_trimmed(snapshot.notes.as_deref()),
+                    snapshot.scheduled_at,
+                    snapshot.status,
+                    clarification,
+                    snapshot.source_title.trim(),
+                    updated_at,
+                    snapshot.reminder_minutes_before,
+                    optional_trimmed(snapshot.tag.as_deref()),
+                ],
+            )?;
+        } else {
+            let now = snapshot.updated_at.max(Utc::now().timestamp_millis());
+            let feed_id = format!("cloud:{}", snapshot.id);
+            transaction.execute(
+                "INSERT OR IGNORE INTO feed_events
+                 (id, raw_content, content_type, source_type, source_metadata, processing_status, created_at)
+                 VALUES (?1, ?2, 'text', 'feishu_base', ?3, 'classified', ?4)",
+                params![
+                    feed_id,
+                    snapshot.content,
+                    json!({ "plan_id": snapshot.id }).to_string(),
+                    now,
+                ],
+            )?;
+            let clarification = (snapshot.status == "needs_clarification")
+                .then_some("请补充计划的具体日期和时间。");
+            transaction.execute(
+                "INSERT INTO plans
+                 (id, feed_event_id, title, details, content, link_url, notes, scheduled_at,
+                  status, clarification_question, source_title, created_at, updated_at,
+                  feishu_synced_at, reminder_minutes_before, tag)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?12, ?13, ?14)",
+                params![
+                    snapshot.id,
+                    feed_id,
+                    snapshot.title.trim(),
+                    snapshot.details.trim(),
+                    snapshot.content.trim(),
+                    optional_trimmed(snapshot.link_url.as_deref()),
+                    optional_trimmed(snapshot.notes.as_deref()),
+                    snapshot.scheduled_at,
+                    snapshot.status,
+                    clarification,
+                    snapshot.source_title.trim(),
+                    now,
+                    snapshot.reminder_minutes_before,
+                    optional_trimmed(snapshot.tag.as_deref()),
+                ],
+            )?;
+        }
+        let plan = self.get_plan_locked(&transaction, &snapshot.id)?;
+        transaction.commit()?;
+        Ok(Some(plan))
     }
 
     pub fn list_due_plan_reminders(&self, now: i64, due_at: i64) -> AppResult<Vec<PlanItem>> {
@@ -1648,18 +1784,21 @@ impl Database {
             created_at: Utc::now().timestamp_millis(),
             feishu_synced_at: None,
         };
-        let connection = self.connection.lock().expect("database lock poisoned");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("database lock poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "INSERT INTO memo_records (id, content, source_title, created_at, feishu_synced_at)
              VALUES (?1, ?2, ?3, ?4, NULL)",
             params![item.id, item.content, item.source_title, item.created_at],
         )?;
+        upsert_memo_recall_index(&transaction, &item)?;
+        transaction.commit()?;
         Ok(item)
     }
 
     pub fn update_memo(&self, id: &str, content: &str) -> AppResult<MemoItem> {
         let content = validate_memo_content(content)?;
-        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut connection = self.connection.lock().expect("database lock poisoned");
         let existing = connection
             .query_row(
                 "SELECT id, content, source_title, created_at, feishu_synced_at
@@ -1672,15 +1811,19 @@ impl Database {
         if existing.content == content {
             return Ok(existing);
         }
-        connection.execute(
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "UPDATE memo_records SET content = ?2, feishu_synced_at = NULL WHERE id = ?1",
             params![id, content],
         )?;
-        Ok(MemoItem {
+        let updated = MemoItem {
             content: content.to_string(),
             feishu_synced_at: None,
             ..existing
-        })
+        };
+        upsert_memo_recall_index(&transaction, &updated)?;
+        transaction.commit()?;
+        Ok(updated)
     }
 
     pub fn list_memos(&self, limit: i64) -> AppResult<Vec<MemoItem>> {
@@ -1691,6 +1834,126 @@ impl Database {
         )?;
         let rows = statement.query_map([limit.clamp(1, 100_000)], map_memo)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn recall_memos(
+        &self,
+        context: &str,
+        exclude_memo_id: Option<&str>,
+    ) -> AppResult<MemoRecallResult> {
+        let context_document = crate::memo_recall::analyze(context);
+        let terms = crate::memo_recall::search_terms(&context_document);
+        if terms.is_empty() || context_document.entities.is_empty() {
+            return Ok(MemoRecallResult {
+                matches: Vec::new(),
+                total: 0,
+            });
+        }
+        let query = terms
+            .iter()
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let connection = self.connection.lock().expect("database lock poisoned");
+        let mut statement = connection.prepare(
+            "SELECT m.id, m.content, m.source_title, m.created_at, m.feishu_synced_at,
+                    i.tokens_json, i.entities_json, i.phrases_json,
+                    bm25(memo_recall_fts)
+             FROM memo_recall_fts
+             JOIN memo_records m ON m.id = memo_recall_fts.memo_id
+             JOIN memo_recall_index i ON i.memo_id = m.id
+             WHERE memo_recall_fts MATCH ?1
+               AND (?2 IS NULL OR m.id <> ?2)
+             ORDER BY bm25(memo_recall_fts)
+             LIMIT 100",
+        )?;
+        let rows = statement.query_map(params![query, exclude_memo_id], |row| {
+            Ok((
+                MemoItem {
+                    id: row.get(0)?,
+                    content: row.get(1)?,
+                    source_title: row.get(2)?,
+                    created_at: row.get(3)?,
+                    feishu_synced_at: row.get(4)?,
+                },
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, f64>(8)?,
+            ))
+        })?;
+        let candidates = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let max_relevance = candidates
+            .iter()
+            .map(|candidate| (-candidate.4).max(0.0))
+            .fold(0.0_f64, f64::max);
+        let mut matches = Vec::new();
+        for (position, (memo, tokens_json, entities_json, phrases_json, rank)) in
+            candidates.into_iter().enumerate()
+        {
+            let memo_document = crate::memo_recall::RecallDocument {
+                tokens: serde_json::from_str(&tokens_json)?,
+                entities: serde_json::from_str(&entities_json)?,
+                phrases: serde_json::from_str(&phrases_json)?,
+            };
+            let mut feedback = connection.prepare(
+                "SELECT term FROM memo_recall_feedback WHERE memo_id = ?1 AND penalty > 0",
+            )?;
+            let penalties = feedback
+                .query_map([&memo.id], |row| row.get::<_, String>(0))?
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let relevance = (-rank).max(0.0);
+            let bm25_score = if max_relevance > 0.0 {
+                relevance / max_relevance
+            } else {
+                1.0 / (position as f64 + 1.0)
+            };
+            if let Some(result) =
+                crate::memo_recall::score(&context_document, &memo_document, bm25_score, &penalties)
+            {
+                matches.push(MemoRecallMatch {
+                    memo,
+                    score: result.score,
+                    matched_entities: result.matched_entities,
+                    matched_terms: result.matched_terms,
+                });
+            }
+        }
+        matches.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let total = matches.len();
+        matches.truncate(5);
+        Ok(MemoRecallResult { matches, total })
+    }
+
+    pub fn mark_memo_recall_irrelevant(&self, memo_id: &str, terms: &[String]) -> AppResult<()> {
+        let connection = self.connection.lock().expect("database lock poisoned");
+        if !connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memo_records WHERE id = ?1)",
+            [memo_id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(AppError::NotFound("备忘录不存在".to_string()));
+        }
+        for term in terms
+            .iter()
+            .map(|term| term.trim())
+            .filter(|term| !term.is_empty())
+            .take(12)
+        {
+            connection.execute(
+                "INSERT INTO memo_recall_feedback (memo_id, term, penalty)
+                 VALUES (?1, ?2, 1)
+                 ON CONFLICT(memo_id, term) DO UPDATE SET penalty = penalty + 1",
+                params![memo_id, term],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn list_pending_feishu_memos(&self, limit: i64) -> AppResult<Vec<MemoItem>> {
@@ -2375,6 +2638,20 @@ fn ensure_plan_columns(connection: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+fn ensure_memo_recall_columns(connection: &Connection) -> AppResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(memo_recall_index)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "index_version") {
+        connection.execute(
+            "ALTER TABLE memo_recall_index ADD COLUMN index_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn map_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanItem> {
     Ok(PlanItem {
         id: row.get(0)?,
@@ -2406,6 +2683,66 @@ fn map_encrypted_secret(row: &rusqlite::Row<'_>) -> rusqlite::Result<EncryptedSe
         updated_at: row.get(4)?,
         feishu_synced_at: row.get(5)?,
     })
+}
+
+fn rebuild_memo_recall_index(connection: &mut Connection) -> AppResult<()> {
+    let transaction = connection.transaction()?;
+    let memos = {
+        let mut statement = transaction.prepare(
+            "SELECT m.id, m.content, m.source_title, m.created_at, m.feishu_synced_at
+             FROM memo_records m
+             LEFT JOIN memo_recall_index i ON i.memo_id = m.id
+             WHERE i.memo_id IS NULL OR i.index_version <> ?1",
+        )?;
+        let items = statement
+            .query_map([crate::memo_recall::INDEX_VERSION], map_memo)?
+            .collect::<Result<Vec<_>, _>>()?;
+        items
+    };
+    transaction.execute(
+        "DELETE FROM memo_recall_fts WHERE memo_id NOT IN (SELECT id FROM memo_records)",
+        [],
+    )?;
+    for memo in &memos {
+        upsert_memo_recall_index(&transaction, memo)?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn upsert_memo_recall_index(transaction: &Transaction<'_>, memo: &MemoItem) -> AppResult<()> {
+    let document = crate::memo_recall::analyze(&memo.content);
+    let tokens_json = serde_json::to_string(&document.tokens)?;
+    let entities_json = serde_json::to_string(&document.entities)?;
+    let phrases_json = serde_json::to_string(&document.phrases)?;
+    let search_text = crate::memo_recall::search_terms(&document).join(" ");
+    transaction.execute(
+        "INSERT INTO memo_recall_index
+         (memo_id, tokens_json, entities_json, phrases_json, search_text, index_version, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(memo_id) DO UPDATE SET
+            tokens_json = excluded.tokens_json,
+            entities_json = excluded.entities_json,
+            phrases_json = excluded.phrases_json,
+            search_text = excluded.search_text,
+            index_version = excluded.index_version,
+            updated_at = excluded.updated_at",
+        params![
+            memo.id,
+            tokens_json,
+            entities_json,
+            phrases_json,
+            search_text,
+            crate::memo_recall::INDEX_VERSION,
+            Utc::now().timestamp_millis()
+        ],
+    )?;
+    transaction.execute("DELETE FROM memo_recall_fts WHERE memo_id = ?1", [&memo.id])?;
+    transaction.execute(
+        "INSERT INTO memo_recall_fts (memo_id, search_text) VALUES (?1, ?2)",
+        params![memo.id, search_text],
+    )?;
+    Ok(())
 }
 
 fn map_memo(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoItem> {
@@ -2726,6 +3063,61 @@ mod tests {
     }
 
     #[test]
+    fn memo_recall_requires_entity_and_topic_and_tracks_edits() {
+        let database = Database::in_memory().unwrap();
+        let matching = database
+            .create_memo("FeedNote 移动端可以增加离线同步和稍后合并机制", "产品讨论")
+            .unwrap();
+        database
+            .create_memo("另一个产品要调整登录页面的颜色", "设计讨论")
+            .unwrap();
+
+        let recalled = database
+            .recall_memos("继续讨论 FeedNote 手机端离线能力", None)
+            .unwrap();
+        assert_eq!(recalled.total, 1);
+        assert_eq!(recalled.matches[0].memo.id, matching.id);
+
+        let excluded = database
+            .recall_memos("继续讨论 FeedNote 手机端离线能力", Some(&matching.id))
+            .unwrap();
+        assert!(excluded.matches.is_empty());
+
+        database
+            .update_memo(&matching.id, "FeedNote 桌面端窗口透明度方案")
+            .unwrap();
+        let after_edit = database
+            .recall_memos("继续讨论 FeedNote 手机端离线能力", None)
+            .unwrap();
+        assert!(after_edit.matches.is_empty());
+    }
+
+    #[test]
+    fn irrelevant_feedback_suppresses_the_same_match_terms() {
+        let database = Database::in_memory().unwrap();
+        let memo = database
+            .create_memo("FeedNote 移动端离线同步设计", "产品讨论")
+            .unwrap();
+        let first = database
+            .recall_memos("FeedNote 手机端离线同步", None)
+            .unwrap();
+        assert_eq!(first.total, 1);
+        let terms = first.matches[0]
+            .matched_entities
+            .iter()
+            .chain(first.matches[0].matched_terms.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        database
+            .mark_memo_recall_irrelevant(&memo.id, &terms)
+            .unwrap();
+        let second = database
+            .recall_memos("FeedNote 手机端离线同步", None)
+            .unwrap();
+        assert!(second.matches.is_empty());
+    }
+
+    #[test]
     fn selection_feed_plan_can_be_clarified_and_scheduled() {
         let database = Database::in_memory().unwrap();
         let feed = database
@@ -2768,6 +3160,38 @@ mod tests {
             .list_due_plan_reminders(1_788_130_000_000, 1_788_134_400_000)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn cloud_plan_is_imported_and_newer_remote_changes_are_applied() {
+        let database = Database::in_memory().unwrap();
+        let first = CloudPlanSnapshot {
+            id: "cloud-plan-1".to_string(),
+            title: "云端计划".to_string(),
+            details: "从多维表格创建".to_string(),
+            content: "查看计划".to_string(),
+            link_url: None,
+            notes: None,
+            scheduled_at: Some(1_788_854_400_000),
+            status: "scheduled".to_string(),
+            source_title: "FeedNote Web".to_string(),
+            updated_at: Utc::now().timestamp_millis() + 10_000,
+            reminder_minutes_before: 180,
+            tag: None,
+            deleted: false,
+        };
+        let imported = database.apply_cloud_plan(&first).unwrap().unwrap();
+        assert_eq!(imported.title, "云端计划");
+        assert_eq!(database.list_plans(true).unwrap().len(), 1);
+
+        let second = CloudPlanSnapshot {
+            title: "网页改过的计划".to_string(),
+            updated_at: first.updated_at + 10_000,
+            ..first
+        };
+        let updated = database.apply_cloud_plan(&second).unwrap().unwrap();
+        assert_eq!(updated.title, "网页改过的计划");
+        assert!(updated.feishu_synced_at.is_some());
     }
 
     #[test]

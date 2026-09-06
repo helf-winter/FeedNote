@@ -254,6 +254,45 @@ pub struct MemoCaptureResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoRecallMatch {
+    pub memo: MemoItem,
+    pub score: f64,
+    pub matched_entities: Vec<String>,
+    pub matched_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoRecallResult {
+    pub matches: Vec<MemoRecallMatch>,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoRecallSurfaceState {
+    pub mode: String,
+    pub result: Option<MemoRecallResult>,
+}
+
+impl MemoRecallSurfaceState {
+    pub fn input() -> Self {
+        Self {
+            mode: "input".to_string(),
+            result: None,
+        }
+    }
+
+    pub fn result(result: MemoRecallResult) -> Self {
+        Self {
+            mode: "result".to_string(),
+            result: Some(result),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuMemoStatus {
@@ -394,6 +433,23 @@ pub struct UpdatePlanInput {
     pub scheduled_at: Option<i64>,
     pub reminder_minutes_before: u32,
     pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CloudPlanSnapshot {
+    pub id: String,
+    pub title: String,
+    pub details: String,
+    pub content: String,
+    pub link_url: Option<String>,
+    pub notes: Option<String>,
+    pub scheduled_at: Option<i64>,
+    pub status: String,
+    pub source_title: String,
+    pub updated_at: i64,
+    pub reminder_minutes_before: u32,
+    pub tag: Option<String>,
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

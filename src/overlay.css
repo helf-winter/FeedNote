@@ -1,4 +1,8 @@
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) {
+:where(
+  body[data-surface="capture-menu"],
+  body[data-surface="plan-dock"],
+  body[data-surface="memo-recall"]
+) {
   color: #202522;
   font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
   font-synthesis: none;
@@ -7,8 +11,18 @@
 
 :root:has(body[data-surface="capture-menu"]),
 :root:has(body[data-surface="plan-dock"]),
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]),
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) #app {
+:root:has(body[data-surface="memo-recall"]),
+:where(
+  body[data-surface="capture-menu"],
+  body[data-surface="plan-dock"],
+  body[data-surface="memo-recall"]
+),
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  #app {
   width: 100%;
   height: 100%;
   margin: 0;
@@ -16,24 +30,59 @@
   background: transparent;
 }
 
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) *,
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) *::before,
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) *::after {
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  *,
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  *::before,
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  *::after {
   box-sizing: border-box;
 }
 
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) button,
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) input {
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  button,
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  input {
   color: inherit;
   font: inherit;
   letter-spacing: 0;
 }
 
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) button {
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  button {
   cursor: pointer;
 }
 
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) button:disabled {
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  button:disabled {
   cursor: default;
   opacity: 0.58;
 }
@@ -346,7 +395,9 @@
   border: 1px solid rgb(9 87 80 / 58%);
   border-radius: 7px;
   box-shadow: 0 5px 13px rgb(20 55 50 / 30%);
-  transition: background-color 150ms ease, transform 150ms ease;
+  transition:
+    background-color 150ms ease,
+    transform 150ms ease;
 }
 
 .dock-tab.text-drop-active .dock-logo,
@@ -670,7 +721,10 @@
   background: rgb(255 255 255 / 80%);
   border: 1px solid #b6c2bb;
   border-radius: 5px;
-  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease;
 }
 
 .complete-plan:hover,
@@ -853,18 +907,272 @@
   border-radius: 5px;
 }
 
-:where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) .spin {
+:where(
+    body[data-surface="capture-menu"],
+    body[data-surface="plan-dock"],
+    body[data-surface="memo-recall"]
+  )
+  .spin {
   animation: overlay-spin 800ms linear infinite;
 }
 
 @keyframes overlay-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.memo-recall-surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 14px;
+  color: #25302a;
+  background: rgb(249 251 249 / 95%);
+  border: 1px solid rgb(190 202 195 / 84%);
+  border-radius: 8px;
+  box-shadow: 0 16px 42px rgb(24 38 30 / 24%);
+  backdrop-filter: blur(20px) saturate(130%);
+}
+
+.memo-recall-surface > header {
+  display: flex;
+  height: 36px;
+  align-items: center;
+  gap: 9px;
+}
+
+.recall-mark {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: white;
+  background: #1f7e75;
+  border-radius: 6px;
+}
+
+.memo-recall-surface > header > div {
+  display: grid;
+  flex: 1;
+}
+
+.memo-recall-surface > header strong {
+  font-size: 13px;
+}
+
+.memo-recall-surface > header span:not(.recall-mark) {
+  color: #78837d;
+  font-size: 9px;
+}
+
+.memo-recall-surface > header > button,
+.recall-result nav button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  color: #707b75;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+}
+
+.memo-recall-surface > header > button:hover,
+.recall-result nav button:hover:not(:disabled) {
+  color: #26322c;
+  background: rgb(36 52 43 / 7%);
+}
+
+.recall-input,
+.recall-empty {
+  display: grid;
+  height: 225px;
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.recall-input > svg,
+.recall-empty > svg {
+  color: #1f7e75;
+}
+
+.recall-input > strong,
+.recall-empty > strong {
+  margin-top: 9px;
+  font-size: 14px;
+}
+
+.recall-input > p,
+.recall-empty > p {
+  margin: 5px 0 14px;
+  color: #77817b;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.recall-input > div {
+  display: grid;
+  width: 310px;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+}
+
+.recall-input input {
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  background: white;
+  border: 1px solid #cbd5cf;
+  border-radius: 6px;
+  outline: none;
+  font-size: 11px;
+}
+
+.recall-input input:focus {
+  border-color: #1f7e75;
+  box-shadow: 0 0 0 3px rgb(31 126 117 / 12%);
+}
+
+.recall-input button,
+.recall-empty button {
+  display: grid;
+  height: 34px;
+  padding: 0 12px;
+  place-items: center;
+  color: white;
+  background: #1f7e75;
+  border: 0;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.recall-result {
+  padding-top: 9px;
+}
+
+.recall-result-meta {
+  display: flex;
+  height: 26px;
+  align-items: center;
+  justify-content: space-between;
+  color: #637068;
+  font-size: 10px;
+}
+
+.recall-result nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.recall-result nav span {
+  min-width: 30px;
+  text-align: center;
+}
+
+.recall-result article {
+  height: 108px;
+  padding: 12px;
+  background: white;
+  border: 1px solid #d5ddd8;
+  border-left: 3px solid #1f7e75;
+  border-radius: 7px;
+  box-shadow: 0 4px 14px rgb(35 54 43 / 6%);
+}
+
+.recall-result article > p {
+  display: -webkit-box;
+  height: 59px;
+  margin: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 19px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.recall-result article footer {
+  display: flex;
+  margin-top: 7px;
+  justify-content: space-between;
+  color: #7b8580;
+  font-size: 9px;
+}
+
+.recall-hits {
+  margin: 8px 1px 9px;
+  overflow: hidden;
+  color: #617068;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recall-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 8px;
+}
+
+.recall-actions button {
+  display: flex;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.recall-secondary {
+  color: #606a64;
+  background: white;
+  border: 1px solid #d2dad5;
+}
+
+.recall-primary {
+  color: white;
+  background: #1f7e75;
+  border: 1px solid #1f7e75;
+}
+
+.recall-error {
+  position: absolute;
+  right: 14px;
+  bottom: 8px;
+  left: 14px;
+  margin: 0;
+  overflow: hidden;
+  color: #a44735;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) *,
-  :where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) *::before,
-  :where(body[data-surface="capture-menu"], body[data-surface="plan-dock"]) *::after {
+  :where(
+      body[data-surface="capture-menu"],
+      body[data-surface="plan-dock"],
+      body[data-surface="memo-recall"]
+    )
+    *,
+  :where(
+      body[data-surface="capture-menu"],
+      body[data-surface="plan-dock"],
+      body[data-surface="memo-recall"]
+    )
+    *::before,
+  :where(
+      body[data-surface="capture-menu"],
+      body[data-surface="plan-dock"],
+      body[data-surface="memo-recall"]
+    )
+    *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;

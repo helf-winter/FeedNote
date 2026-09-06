@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod error;
 mod feishu_sync;
+mod memo_recall;
 mod mobile_push;
 mod models;
 mod secrets;
@@ -20,13 +21,14 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 pub struct AppState {
     database: Arc<Database>,
     secrets_path: std::path::PathBuf,
     delete_confirmations: Mutex<HashMap<String, (String, i64)>>,
     pending_capture: Mutex<Option<PendingCapture>>,
+    memo_recall_surface: Mutex<models::MemoRecallSurfaceState>,
     selection_suppressed: Arc<AtomicBool>,
     dock_expanded: AtomicBool,
     feishu_syncing: Arc<AtomicBool>,
@@ -69,6 +71,7 @@ pub fn run() {
                 secrets_path: data_dir.join("secrets.env"),
                 delete_confirmations: Mutex::new(HashMap::new()),
                 pending_capture: Mutex::new(None),
+                memo_recall_surface: Mutex::new(models::MemoRecallSurfaceState::input()),
                 selection_suppressed: selection_suppressed.clone(),
                 dock_expanded: AtomicBool::new(false),
                 feishu_syncing: Arc::new(AtomicBool::new(false)),
@@ -124,12 +127,42 @@ pub fn run() {
             .disable_drag_drop_handler()
             .build()?;
 
+            WebviewWindowBuilder::new(
+                app,
+                "memo-recall",
+                WebviewUrl::App("index.html?surface=memo-recall".into()),
+            )
+            .title("FeedNote memo recall")
+            .inner_size(380.0, 300.0)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
+            .visible(false)
+            .build()?;
+
             if let Some(main) = app.get_webview_window("main") {
                 let main_for_event = main.clone();
                 main.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         let _ = main_for_event.hide();
+                    }
+                });
+            }
+            if let Some(recall) = app.get_webview_window("memo-recall") {
+                let recall_for_event = recall.clone();
+                recall.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = recall_for_event.hide();
+                        recall_for_event
+                            .app_handle()
+                            .state::<AppState>()
+                            .selection_suppressed
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                 });
             }
@@ -175,8 +208,18 @@ pub fn run() {
 
             let shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
             app.global_shortcut()
-                .on_shortcut(shortcut, |app, _shortcut, _event| {
-                    show_main_window(app);
+                .on_shortcut(shortcut, |app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        show_main_window(app);
+                    }
+                })?;
+            let recall_shortcut =
+                Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::KeyM);
+            app.global_shortcut()
+                .on_shortcut(recall_shortcut, |app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        commands::trigger_manual_memo_recall(app);
+                    }
                 })?;
             Ok(())
         })
@@ -201,6 +244,11 @@ pub fn run() {
             commands::list_memos,
             commands::update_memo,
             commands::record_memo_capture,
+            commands::get_memo_recall_state,
+            commands::recall_memos,
+            commands::dismiss_memo_recall,
+            commands::mark_memo_recall_irrelevant,
+            commands::open_memo_recall_target,
             commands::get_vault_status,
             commands::initialize_vault,
             commands::unlock_vault,
