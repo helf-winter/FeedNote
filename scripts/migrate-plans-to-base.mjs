@@ -78,6 +78,10 @@ const statusName = (status) =>
     : status === "needs_clarification"
       ? "待安排"
       : "已安排";
+const urlField = (value) => {
+  const url = value?.trim();
+  return url ? { link: url, text: url } : null;
+};
 const payloadPath = resolve(".tooling/base-migration-record.json");
 mkdirSync(resolve(".tooling"), { recursive: true });
 for (const plan of plans) {
@@ -87,7 +91,7 @@ for (const plan of plans) {
     时间: plan.scheduled_at || null,
     内容: plan.content,
     详情: plan.details,
-    链接: plan.link_url || null,
+    链接: urlField(plan.link_url),
     注意事项: plan.notes || null,
     标签: plan.tag ? [plan.tag] : [],
     来源: plan.source_title,

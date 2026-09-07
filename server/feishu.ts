@@ -151,7 +151,17 @@ function text(value: unknown): string {
       )
       .join("");
   }
+  if (value && typeof value === "object") {
+    const cell = value as { link?: unknown; text?: unknown };
+    if (cell.link != null) return String(cell.link);
+    if (cell.text != null) return String(cell.text);
+  }
   return value == null ? "" : String(value);
+}
+
+export function baseUrlField(value: string | null | undefined): unknown {
+  const url = value?.trim();
+  return url ? { link: url, text: url } : null;
 }
 
 function timestamp(value: unknown): number | undefined {
@@ -218,7 +228,7 @@ function toFields(
   if (input.scheduledAt !== undefined) fields["时间"] = input.scheduledAt;
   if (input.content !== undefined) fields["内容"] = input.content;
   if (input.details !== undefined) fields["详情"] = input.details;
-  if (input.linkUrl !== undefined) fields["链接"] = input.linkUrl || null;
+  if (input.linkUrl !== undefined) fields["链接"] = baseUrlField(input.linkUrl);
   if (input.notes !== undefined) fields["注意事项"] = input.notes;
   if (input.tags !== undefined) fields["标签"] = input.tags;
   if (input.sourceTitle !== undefined) fields["来源"] = input.sourceTitle;

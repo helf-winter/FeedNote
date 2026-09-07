@@ -39,7 +39,7 @@ const HEADERS: [&str; 9] = [
     "来源",
     "更新时间",
 ];
-const TASK_UPDATE_FIELDS: [&str; 5] = ["summary", "description", "start", "due", "completed_at"];
+const TASK_UPDATE_FIELDS: [&str; 4] = ["summary", "description", "start", "due"];
 const SECRET_HEADERS: [&str; 8] = [
     "本地秘密ID",
     "类型",
@@ -486,6 +486,7 @@ async fn sync_plan_tasks(
                 &mapping.task_guid,
                 plan,
                 completed,
+                mapping.completed,
             )
             .await?
             .or_else(|| mapping.task_url.clone());
@@ -731,30 +732,19 @@ async fn patch_task(
     task_guid: &str,
     plan: &PlanItem,
     completed: bool,
+    remote_completed: bool,
 ) -> AppResult<Option<String>> {
-    let timestamp = plan
-        .scheduled_at
-        .ok_or_else(|| AppError::Validation("没有时间的计划不能更新飞书待办".to_string()))?
-        .to_string();
-    let completed_at = if completed {
-        Utc::now().timestamp_millis().to_string()
-    } else {
-        "0".to_string()
-    };
+    let payload = task_patch_payload(
+        plan,
+        completed,
+        remote_completed,
+        Utc::now().timestamp_millis(),
+    )?;
     let response = client
         .patch(format!("{API_BASE}/task/v2/tasks/{task_guid}"))
         .bearer_auth(token)
         .query(&[("user_id_type", user_id_type)])
-        .json(&json!({
-            "task": {
-                "summary": truncate_chars(plan.title.trim(), 3_000),
-                "description": task_description(plan),
-                "start": { "timestamp": timestamp, "is_all_day": false },
-                "due": { "timestamp": timestamp, "is_all_day": false },
-                "completed_at": completed_at,
-            },
-            "update_fields": TASK_UPDATE_FIELDS,
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(network_error)?;
@@ -768,6 +758,37 @@ async fn patch_task(
     )
     .await?;
     Ok(payload["data"]["task"]["url"].as_str().map(str::to_string))
+}
+
+fn task_patch_payload(
+    plan: &PlanItem,
+    completed: bool,
+    remote_completed: bool,
+    completed_at: i64,
+) -> AppResult<Value> {
+    let timestamp = plan
+        .scheduled_at
+        .ok_or_else(|| AppError::Validation("没有时间的计划不能更新飞书待办".to_string()))?
+        .to_string();
+    let mut task = json!({
+        "summary": truncate_chars(plan.title.trim(), 3_000),
+        "description": task_description(plan),
+        "start": { "timestamp": timestamp, "is_all_day": false },
+        "due": { "timestamp": timestamp, "is_all_day": false },
+    });
+    let mut update_fields = TASK_UPDATE_FIELDS.to_vec();
+    if completed != remote_completed {
+        task["completed_at"] = json!(if completed {
+            completed_at.to_string()
+        } else {
+            "0".to_string()
+        });
+        update_fields.push("completed_at");
+    }
+    Ok(json!({
+        "task": task,
+        "update_fields": update_fields,
+    }))
 }
 
 async fn replace_task_reminder(
@@ -1164,6 +1185,13 @@ fn non_empty_cell(value: &Value) -> Option<String> {
     (!value.trim().is_empty()).then_some(value)
 }
 
+fn base_url_field(value: Option<&str>) -> Value {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Value::Null;
+    };
+    json!({ "link": value, "text": value })
+}
+
 fn timestamp_value(value: &Value) -> Option<i64> {
     let value = value
         .as_i64()
@@ -1214,7 +1242,7 @@ fn base_plan_fields(plan: &PlanItem, owner_id: &str) -> Value {
         "时间": plan.scheduled_at,
         "内容": plan.content,
         "详情": plan.details,
-        "链接": plan.link_url,
+        "链接": base_url_field(plan.link_url.as_deref()),
         "注意事项": plan.notes,
         "标签": plan.tag.as_ref().map(|tag| vec![tag]).unwrap_or_default(),
         "来源": plan.source_title,
@@ -2011,6 +2039,28 @@ fn network_error(error: reqwest::Error) -> AppError {
 mod tests {
     use super::*;
 
+    fn task_plan() -> PlanItem {
+        PlanItem {
+            id: "plan-1".to_string(),
+            feed_event_id: "feed-1".to_string(),
+            title: "完成前端面试".to_string(),
+            details: "准备好项目介绍".to_string(),
+            content: "前端面试".to_string(),
+            link_url: Some("https://example.com".to_string()),
+            notes: None,
+            scheduled_at: Some(1_788_854_400_000),
+            status: "scheduled".to_string(),
+            clarification_question: None,
+            source_title: "测试".to_string(),
+            created_at: 1,
+            updated_at: 2,
+            reminded_at: None,
+            feishu_synced_at: None,
+            reminder_minutes_before: 180,
+            tag: Some("面试".to_string()),
+        }
+    }
+
     #[test]
     fn neutralizes_spreadsheet_formula_prefixes() {
         assert_eq!(safe_cell("=IMPORTXML(...)"), "'=IMPORTXML(...)");
@@ -2150,7 +2200,28 @@ mod tests {
         assert_eq!(fields["所有者ID"], "ou_owner");
         assert_eq!(fields["状态"], "已安排");
         assert_eq!(fields["标签"], json!(["面试"]));
+        assert_eq!(
+            fields["链接"],
+            json!({ "link": "https://example.com", "text": "https://example.com" })
+        );
         assert!(fields.get("原始投喂").is_none());
+    }
+
+    #[test]
+    fn base_url_fields_are_structured_and_empty_values_are_cleared() {
+        assert_eq!(
+            base_url_field(Some(" https://example.com/path#section ")),
+            json!({
+                "link": "https://example.com/path#section",
+                "text": "https://example.com/path#section"
+            })
+        );
+        assert_eq!(base_url_field(Some("  ")), Value::Null);
+        assert_eq!(base_url_field(None), Value::Null);
+        assert_eq!(
+            cell_text(&json!({ "link": "https://example.com", "text": "Example" })),
+            "https://example.com"
+        );
     }
 
     #[test]
@@ -2168,6 +2239,27 @@ mod tests {
             "completed_at": "0"
         })));
         assert!(!TASK_UPDATE_FIELDS.contains(&"reminders"));
+    }
+
+    #[test]
+    fn task_patch_only_writes_completion_when_state_changes() {
+        let plan = task_plan();
+        let unchanged_done = task_patch_payload(&plan, true, true, 123).unwrap();
+        assert!(unchanged_done["task"].get("completed_at").is_none());
+        assert!(!unchanged_done["update_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("completed_at")));
+
+        let mark_done = task_patch_payload(&plan, true, false, 123).unwrap();
+        assert_eq!(mark_done["task"]["completed_at"], "123");
+        assert!(mark_done["update_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("completed_at")));
+
+        let reopen = task_patch_payload(&plan, false, true, 123).unwrap();
+        assert_eq!(reopen["task"]["completed_at"], "0");
     }
 
     #[test]

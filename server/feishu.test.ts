@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FeishuError,
   WEB_OAUTH_SCOPES,
+  baseUrlField,
   fromBaseRecord,
   oauthAuthorizeUrl,
   requiresUserReauthorization,
@@ -37,6 +38,7 @@ describe("Feishu Base mapping", () => {
         标题: [{ text: "前端面试" }],
         状态: "已安排",
         时间: 1_788_566_400_000,
+        链接: { link: "https://example.com/interview", text: "面试入口" },
         标签: ["面试"],
         版本: 3,
         提醒提前分钟: 180,
@@ -47,9 +49,19 @@ describe("Feishu Base mapping", () => {
       id: "plan-1",
       title: "前端面试",
       status: "scheduled",
+      linkUrl: "https://example.com/interview",
       tags: ["面试"],
       version: 3,
     });
+  });
+
+  it("writes URL cells in Feishu's structured shape", () => {
+    expect(baseUrlField(" https://example.com/path#section ")).toEqual({
+      link: "https://example.com/path#section",
+      text: "https://example.com/path#section",
+    });
+    expect(baseUrlField("  ")).toBeNull();
+    expect(baseUrlField(undefined)).toBeNull();
   });
 
   it("encodes the OAuth callback and state", () => {
