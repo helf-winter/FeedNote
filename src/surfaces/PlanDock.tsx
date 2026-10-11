@@ -20,6 +20,7 @@ import {
   LoaderCircle,
   NotebookText,
   PanelRightClose,
+  RefreshCw,
   Tag,
 } from "lucide-react";
 import { canAcceptTextDrop, droppedPlainText } from "../dropText";
@@ -31,9 +32,11 @@ import {
   resolvePlanTime,
   setPlanDone,
   showPlanDockMenu,
+  syncFeishuNow,
   togglePlanDock,
   type PlanItem,
 } from "../api";
+import { syncPlansFromFeishu } from "../planDockSync";
 import { checkForOnlineUpdate } from "../updater";
 
 const OPACITY_KEY = "feednote.plan-dock.opacity";
@@ -51,6 +54,8 @@ export default function PlanDock() {
   const [plans, setPlans] = useState<PlanItem[]>([]);
   const [tagFilter, setTagFilter] = useState<"all" | "面试">("all");
   const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("");
   const [error, setError] = useState("");
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [opacity, setOpacity] = useState(() =>
@@ -62,6 +67,7 @@ export default function PlanDock() {
   const collapsedPointer = useRef<{ id: number; x: number; y: number }>();
   const dragDepth = useRef(0);
   const dropTimer = useRef<number>();
+  const syncMessageTimer = useRef<number>();
   const visiblePlans = useMemo(
     () =>
       tagFilter === "all"
@@ -113,6 +119,8 @@ export default function PlanDock() {
       stops.forEach((stop) => stop());
       window.clearInterval(timer);
       if (dropTimer.current) window.clearTimeout(dropTimer.current);
+      if (syncMessageTimer.current)
+        window.clearTimeout(syncMessageTimer.current);
     };
   }, []);
 
@@ -170,6 +178,26 @@ export default function PlanDock() {
   async function complete(plan: PlanItem) {
     await setPlanDone(plan.id, true);
     await refresh();
+  }
+  async function syncNow() {
+    if (syncing) return;
+    setSyncing(true);
+    setError("");
+    setSyncMessage("");
+    try {
+      const message = await syncPlansFromFeishu(syncFeishuNow, refresh);
+      setSyncMessage(message);
+      if (syncMessageTimer.current)
+        window.clearTimeout(syncMessageTimer.current);
+      syncMessageTimer.current = window.setTimeout(
+        () => setSyncMessage(""),
+        3200,
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSyncing(false);
+    }
   }
   async function answer(plan: PlanItem) {
     const value = answers[plan.id]?.trim();
@@ -375,6 +403,15 @@ export default function PlanDock() {
         <nav>
           <button
             type="button"
+            title="立即同步飞书计划"
+            aria-label="立即同步飞书计划"
+            disabled={syncing}
+            onClick={() => void syncNow()}
+          >
+            <RefreshCw className={syncing ? "spin" : undefined} size={17} />
+          </button>
+          <button
+            type="button"
             aria-label="打开记忆库"
             onClick={() => void openMainWindow()}
           >
@@ -515,6 +552,7 @@ export default function PlanDock() {
       {(dropMessage || error) && (
         <p className="dock-error">{dropMessage || error}</p>
       )}
+      {syncMessage && <p className="dock-sync-message">{syncMessage}</p>}
     </aside>
   );
 }

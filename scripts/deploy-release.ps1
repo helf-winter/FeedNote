@@ -21,6 +21,26 @@ $ReleaseDirectory = Join-Path $FeedNoteRoot ".tooling\release-ready"
 $StagedPath = Join-Path $ReleaseDirectory "FeedNote.exe"
 $BackupPath = Join-Path $ReleaseDirectory "FeedNote.previous.exe"
 
+function Copy-FileWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [int]$Attempts = 10
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $Source -Destination $Destination -Force
+            return
+        } catch {
+            if ($attempt -eq $Attempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds 300
+        }
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($SourcePath)) {
     $SourcePath = Join-Path $env:CARGO_TARGET_DIR "release\feednote.exe"
 }
@@ -63,9 +83,9 @@ $hadPreviousVersion = Test-Path -LiteralPath $InstalledPath -PathType Leaf
 $deploySucceeded = $false
 try {
     if ($hadPreviousVersion) {
-        Copy-Item -LiteralPath $InstalledPath -Destination $BackupPath -Force
+        Copy-FileWithRetry -Source $InstalledPath -Destination $BackupPath
     }
-    Copy-Item -LiteralPath $StagedPath -Destination $InstalledPath -Force
+    Copy-FileWithRetry -Source $StagedPath -Destination $InstalledPath
 
     $installedHash = (Get-FileHash -LiteralPath $InstalledPath -Algorithm SHA256).Hash
     if ($installedHash -ne $stagedHash) {
@@ -74,7 +94,7 @@ try {
     $deploySucceeded = $true
 } catch {
     if ($hadPreviousVersion -and (Test-Path -LiteralPath $BackupPath -PathType Leaf)) {
-        Copy-Item -LiteralPath $BackupPath -Destination $InstalledPath -Force
+        Copy-FileWithRetry -Source $BackupPath -Destination $InstalledPath
     }
     throw
 } finally {

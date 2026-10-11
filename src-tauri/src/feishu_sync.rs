@@ -5,10 +5,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use chrono::{FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, Local, NaiveDate, TimeZone, Timelike, Utc};
 use reqwest::{Client, Url};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -25,6 +25,8 @@ use crate::{
 };
 
 const API_BASE: &str = "https://open.feishu.cn/open-apis";
+const TRANSIENT_ERROR_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const QUOTA_ERROR_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const SHEET_TITLE: &str = "FeedNote 计划";
 const MEMO_SHEET_TITLE: &str = "FeedNote 备忘录";
 const SECRET_SHEET_TITLE: &str = "FeedNote 秘密";
@@ -65,6 +67,72 @@ struct CachedTenantToken {
 
 static TENANT_TOKEN_CACHE: OnceLock<Mutex<Option<CachedTenantToken>>> = OnceLock::new();
 static FEISHU_CLIENT: OnceLock<Client> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemotePullScope {
+    None,
+    Active,
+}
+
+struct RemotePollCadence {
+    startup_pending: bool,
+    last_daily_pull: Option<NaiveDate>,
+    retry_after: Option<Instant>,
+}
+
+impl RemotePollCadence {
+    fn new() -> Self {
+        Self {
+            startup_pending: true,
+            last_daily_pull: None,
+            retry_after: None,
+        }
+    }
+
+    fn can_attempt(&self, now: Instant) -> bool {
+        self.retry_after
+            .is_none_or(|retry_after| now >= retry_after)
+    }
+
+    fn scope(&mut self, now: DateTime<FixedOffset>) -> RemotePullScope {
+        let today = now.date_naive();
+        if self.startup_pending {
+            self.startup_pending = false;
+            if now.hour() >= 12 {
+                self.last_daily_pull = Some(today);
+            }
+            return RemotePullScope::Active;
+        }
+
+        if now.hour() == 12 && self.last_daily_pull != Some(today) {
+            self.last_daily_pull = Some(today);
+            return RemotePullScope::Active;
+        }
+
+        RemotePullScope::None
+    }
+
+    fn defer_after_error(&mut self, now: Instant, error: &AppError) {
+        let backoff = if error.to_string().contains("99991403") {
+            QUOTA_ERROR_BACKOFF
+        } else {
+            TRANSIENT_ERROR_BACKOFF
+        };
+        self.retry_after = now.checked_add(backoff);
+    }
+
+    fn clear_backoff(&mut self) {
+        self.retry_after = None;
+    }
+}
+
+fn automatic_plan_sync_due(
+    pull_scope: RemotePullScope,
+    _plan_pending: bool,
+    _task_pending: bool,
+) -> bool {
+    pull_scope != RemotePullScope::None
+}
 
 struct FeishuSecrets {
     app_id: String,
@@ -131,8 +199,13 @@ pub fn start_scheduler(
 ) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
+        let mut cadence = RemotePollCadence::new();
+        'scheduler: loop {
             interval.tick().await;
+            let now = Instant::now();
+            if !cadence.can_attempt(now) {
+                continue;
+            }
             let settings = match database.get_settings() {
                 Ok(settings) => settings,
                 Err(_) => continue,
@@ -143,40 +216,55 @@ pub fn start_scheduler(
             let memo_pending = database
                 .count_pending_feishu_memos()
                 .is_ok_and(|pending| pending > 0);
-            if settings.feishu_sync_enabled
-                || settings.feishu_task_reminders_enabled
-                || settings.feishu_secret_enabled
-                || memo_pending
-                || cleanup_pending
-            {
+            let plan_pending = database
+                .count_pending_feishu_plans()
+                .is_ok_and(|pending| pending > 0);
+            let task_pending = database
+                .count_pending_feishu_plan_tasks()
+                .is_ok_and(|pending| pending > 0);
+            let secret_pending = settings.feishu_secret_enabled
+                && database
+                    .count_pending_feishu_secrets()
+                    .is_ok_and(|pending| pending > 0);
+            let pull_scope = cadence.scope(Local::now().fixed_offset());
+            let scheduled_plan_sync =
+                automatic_plan_sync_due(pull_scope, plan_pending, task_pending);
+            if scheduled_plan_sync || secret_pending || memo_pending {
                 if let Some(_guard) = SyncGuard::acquire(&syncing) {
-                    if let Err(error) = cleanup_legacy_plan_rows(&database, &secrets_path).await {
-                        let _ = database.save_feishu_sync_error(Some(&error.to_string()));
-                        continue;
+                    if scheduled_plan_sync && cleanup_pending {
+                        if let Err(error) = cleanup_legacy_plan_rows(&database, &secrets_path).await
+                        {
+                            let _ = database.save_feishu_sync_error(Some(&error.to_string()));
+                            cadence.defer_after_error(now, &error);
+                            continue 'scheduler;
+                        }
                     }
-                    if settings.feishu_sync_enabled {
-                        match sync_pending(&database, &secrets_path, &app).await {
+                    if settings.feishu_sync_enabled && scheduled_plan_sync {
+                        match sync_pending(&database, &secrets_path, &app, true).await {
                             Ok(_) => {
                                 let _ = database.save_feishu_sync_error(None);
                             }
                             Err(error) => {
                                 let _ = database.save_feishu_sync_error(Some(&error.to_string()));
+                                cadence.defer_after_error(now, &error);
+                                continue 'scheduler;
                             }
                         }
                     }
-                    if settings.feishu_task_reminders_enabled {
-                        match sync_plan_tasks(&database, &secrets_path, &app).await {
+                    if settings.feishu_task_reminders_enabled && scheduled_plan_sync {
+                        match sync_plan_tasks(&database, &secrets_path, &app, pull_scope).await {
                             Ok(_) => {
                                 let _ = database.save_feishu_task_sync_error(None);
                             }
                             Err(error) => {
                                 let _ =
                                     database.save_feishu_task_sync_error(Some(&error.to_string()));
+                                cadence.defer_after_error(now, &error);
+                                continue 'scheduler;
                             }
                         }
                     }
-                    if settings.feishu_secret_enabled
-                        && vault.status(&database).is_ok_and(|status| status.unlocked)
+                    if secret_pending && vault.status(&database).is_ok_and(|status| status.unlocked)
                     {
                         match sync_secret_pending(&database, &secrets_path, &vault).await {
                             Ok(_) => {
@@ -185,6 +273,8 @@ pub fn start_scheduler(
                             Err(error) => {
                                 let _ = database
                                     .save_feishu_secret_sync_error(Some(&error.to_string()));
+                                cadence.defer_after_error(now, &error);
+                                continue 'scheduler;
                             }
                         }
                     }
@@ -196,9 +286,12 @@ pub fn start_scheduler(
                             Err(error) => {
                                 let _ =
                                     database.save_feishu_memo_sync_error(Some(&error.to_string()));
+                                cadence.defer_after_error(now, &error);
+                                continue 'scheduler;
                             }
                         }
                     }
+                    cadence.clear_backoff();
                 }
             }
         }
@@ -309,7 +402,7 @@ pub async fn sync_now(
     cleanup_legacy_plan_rows(database, secrets_path).await?;
     let settings = database.get_settings()?;
     let synced = if settings.feishu_sync_enabled {
-        match sync_pending(database, secrets_path, app).await {
+        match sync_pending(database, secrets_path, app, true).await {
             Ok(synced) => {
                 database.save_feishu_sync_error(None)?;
                 synced
@@ -323,7 +416,7 @@ pub async fn sync_now(
         0
     };
     let task_synced = if settings.feishu_task_reminders_enabled {
-        match sync_plan_tasks(database, secrets_path, app).await {
+        match sync_plan_tasks(database, secrets_path, app, RemotePullScope::Active).await {
             Ok(synced) => {
                 database.save_feishu_task_sync_error(None)?;
                 synced
@@ -430,9 +523,10 @@ async fn sync_plan_tasks(
     database: &Database,
     secrets_path: &Path,
     app: &AppHandle,
+    pull_scope: RemotePullScope,
 ) -> AppResult<usize> {
     let initial_mappings = database.list_feishu_plan_task_mappings()?;
-    if database.count_pending_feishu_plan_tasks()? == 0 && initial_mappings.is_empty() {
+    if database.count_pending_feishu_plan_tasks()? == 0 && pull_scope == RemotePullScope::None {
         return Ok(0);
     }
     let settings = database.get_settings()?;
@@ -440,13 +534,17 @@ async fn sync_plan_tasks(
     let client = client()?;
     let token = tenant_access_token(&client, &secrets).await?;
     let assignee = resolve_task_assignee(&client, &token, &settings, &secrets).await?;
-    let mut synced = pull_plan_task_statuses(
+    let pull_plans = database.list_plans(true)?;
+    let remote_mappings = task_mappings_for_remote_pull(&pull_plans, &initial_mappings, pull_scope);
+    let mut batch = TaskSyncBatch::default();
+    pull_plan_task_statuses(
         database,
         &client,
         &token,
         &assignee.id_type,
-        &initial_mappings,
+        &remote_mappings,
         app,
+        &mut batch,
     )
     .await?;
     let plans = database.list_plans(true)?;
@@ -461,9 +559,13 @@ async fn sync_plan_tasks(
         if plans_by_id.contains_key(mapping.plan_id.as_str()) {
             continue;
         }
-        complete_task(&client, &token, &assignee.id_type, &mapping.task_guid).await?;
-        database.delete_feishu_plan_task_mapping(&mapping.plan_id)?;
-        synced += 1;
+        match complete_task(&client, &token, &assignee.id_type, &mapping.task_guid).await {
+            Ok(()) => match database.delete_feishu_plan_task_mapping(&mapping.plan_id) {
+                Ok(()) => batch.success(),
+                Err(error) => batch.failure(&mapping.plan_id, &error),
+            },
+            Err(error) => batch.failure(&mapping.plan_id, &error),
+        }
     }
 
     for plan in &plans {
@@ -479,32 +581,81 @@ async fn sync_plan_tasks(
             if mapping.plan_updated_at >= plan.updated_at && mapping.completed == completed {
                 continue;
             }
-            let task_url = patch_task(
+            let remote = match read_task_status(
+                &client,
+                &token,
+                &assignee.id_type,
+                &mapping.task_guid,
+            )
+            .await
+            {
+                Ok(remote) => remote,
+                Err(error) => {
+                    batch.failure(&plan.title, &error);
+                    continue;
+                }
+            };
+            match patch_task(
                 &client,
                 &token,
                 &assignee.id_type,
                 &mapping.task_guid,
                 plan,
-                completed,
-                mapping.completed,
+                &remote,
             )
-            .await?
-            .or_else(|| mapping.task_url.clone());
-            database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
-                plan_id: plan.id.clone(),
-                task_guid: mapping.task_guid.clone(),
-                task_url,
-                plan_updated_at: plan.updated_at,
-                completed,
-            })?;
-            synced += 1;
+            .await
+            {
+                Ok(task_url) => {
+                    let mapping = FeishuPlanTaskMapping {
+                        plan_id: plan.id.clone(),
+                        task_guid: mapping.task_guid.clone(),
+                        task_url: task_url
+                            .or(remote.task_url)
+                            .or_else(|| mapping.task_url.clone()),
+                        plan_updated_at: plan.updated_at,
+                        completed,
+                    };
+                    match database.save_feishu_plan_task_mapping(&mapping) {
+                        Ok(()) => batch.success(),
+                        Err(error) => batch.failure(&plan.title, &error),
+                    }
+                }
+                Err(error) => batch.failure(&plan.title, &error),
+            }
         } else {
-            let mapping = create_task(&client, &token, &assignee, plan).await?;
-            database.save_feishu_plan_task_mapping(&mapping)?;
-            synced += 1;
+            match create_task(&client, &token, &assignee, plan).await {
+                Ok(mapping) => match database.save_feishu_plan_task_mapping(&mapping) {
+                    Ok(()) => batch.success(),
+                    Err(error) => batch.failure(&plan.title, &error),
+                },
+                Err(error) => batch.failure(&plan.title, &error),
+            }
         }
     }
-    Ok(synced)
+    batch.finish()
+}
+
+fn task_mappings_for_remote_pull(
+    plans: &[PlanItem],
+    mappings: &[FeishuPlanTaskMapping],
+    scope: RemotePullScope,
+) -> Vec<FeishuPlanTaskMapping> {
+    if scope == RemotePullScope::None {
+        return Vec::new();
+    }
+    let plans_by_id: HashMap<&str, &PlanItem> =
+        plans.iter().map(|plan| (plan.id.as_str(), plan)).collect();
+    mappings
+        .iter()
+        .filter(|mapping| {
+            plans_by_id
+                .get(mapping.plan_id.as_str())
+                .is_some_and(|plan| {
+                    plan.updated_at <= mapping.plan_updated_at && plan.status != "done"
+                })
+        })
+        .cloned()
+        .collect()
 }
 
 struct RemoteTaskStatus {
@@ -514,6 +665,35 @@ struct RemoteTaskStatus {
     task_url: Option<String>,
 }
 
+#[derive(Default)]
+struct TaskSyncBatch {
+    synced: usize,
+    failures: Vec<String>,
+}
+
+impl TaskSyncBatch {
+    fn success(&mut self) {
+        self.synced += 1;
+    }
+
+    fn failure(&mut self, task_title: &str, error: &AppError) {
+        self.failures
+            .push(format!("{}：{}", truncate_chars(task_title, 48), error));
+    }
+
+    fn finish(self) -> AppResult<usize> {
+        if let Some(first_failure) = self.failures.first() {
+            return Err(AppError::FeishuUnavailable(format!(
+                "飞书待办部分同步失败：已成功同步 {} 条，失败 {} 条；{}",
+                self.synced,
+                self.failures.len(),
+                first_failure
+            )));
+        }
+        Ok(self.synced)
+    }
+}
+
 async fn pull_plan_task_statuses(
     database: &Database,
     client: &Client,
@@ -521,11 +701,11 @@ async fn pull_plan_task_statuses(
     user_id_type: &str,
     mappings: &[FeishuPlanTaskMapping],
     app: &AppHandle,
-) -> AppResult<usize> {
+    batch: &mut TaskSyncBatch,
+) -> AppResult<()> {
     let plans = database.list_plans(true)?;
     let plans_by_id: HashMap<&str, &PlanItem> =
         plans.iter().map(|plan| (plan.id.as_str(), plan)).collect();
-    let mut changed = 0;
     for mapping in mappings {
         let Some(plan) = plans_by_id.get(mapping.plan_id.as_str()).copied() else {
             continue;
@@ -533,7 +713,13 @@ async fn pull_plan_task_statuses(
         if plan.updated_at > mapping.plan_updated_at {
             continue;
         }
-        let remote = read_task_status(client, token, user_id_type, &mapping.task_guid).await?;
+        let remote = match read_task_status(client, token, user_id_type, &mapping.task_guid).await {
+            Ok(remote) => remote,
+            Err(error) => {
+                batch.failure(&plan.title, &error);
+                continue;
+            }
+        };
         let local_completed = plan.status == "done";
         let remote_title_changed = remote
             .title
@@ -544,35 +730,49 @@ async fn pull_plan_task_statuses(
             .is_some_and(|scheduled_at| Some(scheduled_at) != plan.scheduled_at);
         if remote.completed == local_completed && !remote_title_changed && !remote_time_changed {
             if mapping.completed != remote.completed || mapping.plan_updated_at < plan.updated_at {
-                database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
+                let result = database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
                     plan_id: plan.id.clone(),
                     task_guid: mapping.task_guid.clone(),
                     task_url: remote.task_url.or_else(|| mapping.task_url.clone()),
                     plan_updated_at: plan.updated_at,
                     completed: remote.completed,
-                })?;
+                });
+                if let Err(error) = result {
+                    batch.failure(&plan.title, &error);
+                }
             }
             continue;
         }
-        if let Some(updated) = database.apply_remote_plan_task_update(
+        let updated = match database.apply_remote_plan_task_update(
             &plan.id,
             remote.title.as_deref(),
             remote.scheduled_at,
             remote.completed,
             plan.updated_at,
-        )? {
-            database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
+        ) {
+            Ok(updated) => updated,
+            Err(error) => {
+                batch.failure(&plan.title, &error);
+                continue;
+            }
+        };
+        if let Some(updated) = updated {
+            let result = database.save_feishu_plan_task_mapping(&FeishuPlanTaskMapping {
                 plan_id: plan.id.clone(),
                 task_guid: mapping.task_guid.clone(),
                 task_url: remote.task_url.or_else(|| mapping.task_url.clone()),
                 plan_updated_at: updated.updated_at,
                 completed: remote.completed,
-            })?;
+            });
+            if let Err(error) = result {
+                batch.failure(&plan.title, &error);
+                continue;
+            }
             let _ = app.emit("plans-changed", &updated);
-            changed += 1;
+            batch.success();
         }
     }
-    Ok(changed)
+    Ok(())
 }
 
 async fn read_task_status(
@@ -731,15 +931,9 @@ async fn patch_task(
     user_id_type: &str,
     task_guid: &str,
     plan: &PlanItem,
-    completed: bool,
-    remote_completed: bool,
+    remote: &RemoteTaskStatus,
 ) -> AppResult<Option<String>> {
-    let payload = task_patch_payload(
-        plan,
-        completed,
-        remote_completed,
-        Utc::now().timestamp_millis(),
-    )?;
+    let payload = task_patch_payload_from_remote(plan, remote, Utc::now().timestamp_millis())?;
     let response = client
         .patch(format!("{API_BASE}/task/v2/tasks/{task_guid}"))
         .bearer_auth(token)
@@ -789,6 +983,14 @@ fn task_patch_payload(
         "task": task,
         "update_fields": update_fields,
     }))
+}
+
+fn task_patch_payload_from_remote(
+    plan: &PlanItem,
+    remote: &RemoteTaskStatus,
+    completed_at: i64,
+) -> AppResult<Value> {
+    task_patch_payload(plan, plan.status == "done", remote.completed, completed_at)
 }
 
 async fn replace_task_reminder(
@@ -956,14 +1158,18 @@ async fn sync_pending(
     database: &Database,
     secrets_path: &Path,
     app: &AppHandle,
+    pull_remote: bool,
 ) -> AppResult<usize> {
     let secrets = FeishuSecrets::load(secrets_path)?;
     if secrets.base_token.is_some() && secrets.base_table_id.is_some() {
+        if !pull_remote && database.count_pending_feishu_plans()? == 0 {
+            return Ok(0);
+        }
         return sync_base_pending(database, &secrets, app).await;
     }
     let initial_pending = database.list_pending_feishu_plans(200)?;
     let existing_state = database.get_feishu_sheet_state()?;
-    if initial_pending.is_empty() && existing_state.is_none() {
+    if initial_pending.is_empty() && (!pull_remote || existing_state.is_none()) {
         return Ok(0);
     }
 
@@ -2260,6 +2466,142 @@ mod tests {
 
         let reopen = task_patch_payload(&plan, false, true, 123).unwrap();
         assert_eq!(reopen["task"]["completed_at"], "0");
+    }
+
+    #[test]
+    fn existing_completed_task_is_patched_without_completing_it_again() {
+        let mut plan = task_plan();
+        plan.status = "done".to_string();
+        let remote = RemoteTaskStatus {
+            completed: true,
+            title: Some(plan.title.clone()),
+            scheduled_at: plan.scheduled_at,
+            task_url: None,
+        };
+
+        let payload = task_patch_payload_from_remote(&plan, &remote, 123).unwrap();
+        assert!(payload["task"].get("completed_at").is_none());
+        assert!(!payload["update_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("completed_at")));
+    }
+
+    #[test]
+    fn task_sync_batch_reports_failures_after_preserving_successes() {
+        let mut batch = TaskSyncBatch::default();
+        batch.success();
+        batch.success();
+        batch.failure(
+            "异常任务",
+            &AppError::FeishuUnavailable("远端拒绝更新".to_string()),
+        );
+
+        let error = batch.finish().unwrap_err().to_string();
+        assert!(error.contains("已成功同步 2 条"));
+        assert!(error.contains("异常任务"));
+        assert!(error.contains("远端拒绝更新"));
+    }
+
+    #[test]
+    fn remote_poll_cadence_runs_on_startup_and_at_local_noon() {
+        let timezone = FixedOffset::east_opt(8 * 60 * 60).unwrap();
+        let start = timezone.with_ymd_and_hms(2026, 10, 9, 9, 0, 0).unwrap();
+        let mut cadence = RemotePollCadence::new();
+        assert_eq!(cadence.scope(start), RemotePullScope::Active);
+        assert_eq!(
+            cadence.scope(timezone.with_ymd_and_hms(2026, 10, 9, 11, 59, 59).unwrap()),
+            RemotePullScope::None
+        );
+        assert_eq!(
+            cadence.scope(timezone.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap()),
+            RemotePullScope::Active
+        );
+        assert_eq!(
+            cadence.scope(timezone.with_ymd_and_hms(2026, 10, 9, 12, 45, 0).unwrap()),
+            RemotePullScope::None
+        );
+        assert_eq!(
+            cadence.scope(timezone.with_ymd_and_hms(2026, 10, 10, 11, 59, 59).unwrap()),
+            RemotePullScope::None
+        );
+        assert_eq!(
+            cadence.scope(timezone.with_ymd_and_hms(2026, 10, 10, 12, 0, 0).unwrap()),
+            RemotePullScope::Active
+        );
+    }
+
+    #[test]
+    fn startup_after_noon_does_not_repeat_the_daily_sync() {
+        let timezone = FixedOffset::east_opt(8 * 60 * 60).unwrap();
+        let mut cadence = RemotePollCadence::new();
+        assert_eq!(
+            cadence.scope(timezone.with_ymd_and_hms(2026, 10, 9, 15, 0, 0).unwrap()),
+            RemotePullScope::Active
+        );
+        assert_eq!(
+            cadence.scope(timezone.with_ymd_and_hms(2026, 10, 9, 15, 0, 30).unwrap()),
+            RemotePullScope::None
+        );
+        assert_eq!(
+            cadence.scope(timezone.with_ymd_and_hms(2026, 10, 10, 12, 0, 0).unwrap()),
+            RemotePullScope::Active
+        );
+    }
+
+    #[test]
+    fn pending_local_plans_do_not_trigger_automatic_feishu_calls() {
+        assert!(!automatic_plan_sync_due(RemotePullScope::None, true, true));
+        assert!(automatic_plan_sync_due(
+            RemotePullScope::Active,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn quota_errors_back_off_for_hours() {
+        let start = Instant::now();
+        let mut cadence = RemotePollCadence::new();
+        cadence.defer_after_error(
+            start,
+            &AppError::FeishuUnavailable(
+                "飞书接口返回 code=99991403：This month's API call quota has been exceeded"
+                    .to_string(),
+            ),
+        );
+        assert!(!cadence.can_attempt(start + Duration::from_secs(60 * 60)));
+        assert!(cadence.can_attempt(start + Duration::from_secs(6 * 60 * 60)));
+    }
+
+    #[test]
+    fn every_task_pull_skips_completed_tasks() {
+        let mut open = task_plan();
+        open.id = "open".to_string();
+        let mut completed = task_plan();
+        completed.id = "completed".to_string();
+        completed.status = "done".to_string();
+        let mappings = vec![
+            FeishuPlanTaskMapping {
+                plan_id: open.id.clone(),
+                task_guid: "task-open".to_string(),
+                task_url: None,
+                plan_updated_at: open.updated_at,
+                completed: false,
+            },
+            FeishuPlanTaskMapping {
+                plan_id: completed.id.clone(),
+                task_guid: "task-completed".to_string(),
+                task_url: None,
+                plan_updated_at: completed.updated_at,
+                completed: true,
+            },
+        ];
+        let plans = vec![open, completed];
+
+        let routine = task_mappings_for_remote_pull(&plans, &mappings, RemotePullScope::Active);
+        assert_eq!(routine.len(), 1);
+        assert_eq!(routine[0].plan_id, "open");
     }
 
     #[test]

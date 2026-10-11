@@ -144,6 +144,12 @@
   background: rgb(31 39 34 / 7%);
 }
 
+.plan-dock-panel nav button:disabled {
+  color: #9aa39e;
+  background: transparent;
+  cursor: wait;
+}
+
 .icon-button:focus-visible,
 .plan-dock-panel nav button:focus-visible,
 .dock-tab:focus-visible,
@@ -904,6 +910,19 @@
   color: white;
   font-size: 10px;
   background: rgb(137 55 49 / 92%);
+  border-radius: 5px;
+}
+
+.dock-sync-message {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  left: 12px;
+  margin: 0;
+  padding: 7px 9px;
+  color: white;
+  font-size: 10px;
+  background: rgb(28 112 102 / 94%);
   border-radius: 5px;
 }
 
